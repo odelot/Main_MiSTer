@@ -111,7 +111,7 @@ static rc_client_t *g_client = NULL;
 
 // Credentials
 static char g_ra_user[128] = {};
-static char g_ra_token[128] = {};
+static char g_ra_password[128] = {};
 static int g_logged_in = 0;
 static int g_login_pending = 0;
 static int g_game_load_pending = 0;
@@ -282,22 +282,20 @@ static int ra_calculate_rom_md5(const char *path, char *md5_hex_out)
 
 // Config file format (/media/fat/retroachievements.cfg):
 //   username=YourRAUsername
-//   token=YourAPIToken
+//   password=YourRAPassword
 //   # Lines starting with # are comments
-//
-// Token is obtained from retroachievements.org → Settings → API Keys.
 
 static int ra_load_credentials(void)
 {
 	g_ra_user[0] = '\0';
-	g_ra_token[0] = '\0';
+	g_ra_password[0] = '\0';
 
 	FILE *f = fopen(RA_CFG_PATH, "r");
 	if (!f) {
 		RA_LOG("Credentials file not found: %s", RA_CFG_PATH);
 		RA_LOG("To enable RetroAchievements, create the file with:");
 		RA_LOG("  username=YourRAUsername");
-		RA_LOG("  token=YourAPIToken");
+		RA_LOG("  password=YourRAPassword");
 		return 0;
 	}
 
@@ -324,18 +322,18 @@ static int ra_load_credentials(void)
 
 		if (!strcasecmp(key, "username")) {
 			snprintf(g_ra_user, sizeof(g_ra_user), "%s", val);
-		} else if (!strcasecmp(key, "token")) {
-			snprintf(g_ra_token, sizeof(g_ra_token), "%s", val);
+		} else if (!strcasecmp(key, "password")) {
+			snprintf(g_ra_password, sizeof(g_ra_password), "%s", val);
 		}
 	}
 	fclose(f);
 
-	if (!g_ra_user[0] || !g_ra_token[0]) {
-		RA_LOG("Credentials incomplete (need both username and token)");
+	if (!g_ra_user[0] || !g_ra_password[0]) {
+		RA_LOG("Credentials incomplete (need both username and password)");
 		return 0;
 	}
 
-	RA_LOG("Credentials loaded: user=%s token=***(%zu chars)", g_ra_user, strlen(g_ra_token));
+	RA_LOG("Credentials loaded: user=%s password=***(%zu chars)", g_ra_user, strlen(g_ra_password));
 	return 1;
 }
 
@@ -708,7 +706,7 @@ void achievements_init(void)
 	if (has_creds) {
 		RA_LOG("Starting login for user '%s'...", g_ra_user);
 		g_login_pending = 1;
-		rc_client_begin_login_with_token(g_client, g_ra_user, g_ra_token,
+		rc_client_begin_login_with_password(g_client, g_ra_user, g_ra_password,
 			ra_login_callback, NULL);
 	} else {
 		RA_LOG("No credentials — running in monitor-only mode.");
