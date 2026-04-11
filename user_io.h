@@ -273,6 +273,7 @@ char is_menu();
 char is_x86();
 char is_snes();
 char is_sgb();
+char is_nes();
 char is_neogeo();
 char is_neogeo_cd();
 char is_megacd();

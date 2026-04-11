@@ -229,6 +229,13 @@ char is_sgb()
 	return (is_sgb_type == 1);
 }
 
+static int is_nes_type = 0;
+char is_nes()
+{
+	if (!is_nes_type) is_nes_type = strcasecmp(orig_name, "NES") ? 2 : 1;
+	return (is_nes_type == 1);
+}
+
 static int is_cpc_type = 0;
 char is_cpc()
 {
@@ -411,6 +418,7 @@ void user_io_read_core_name()
 	is_no_type   = 0;
 	is_snes_type = 0;
 	is_sgb_type = 0;
+	is_nes_type = 0;
 	is_cpc_type = 0;
 	is_zx81_type = 0;
 	is_neogeo_type = 0;
@@ -1134,7 +1142,6 @@ int GetUARTMode()
 	if (!stat("/tmp/uartmode3", &filestat)) return 3;
 	if (!stat("/tmp/uartmode4", &filestat)) return 4;
 	if (!stat("/tmp/uartmode5", &filestat)) return 5;
-	if (!stat("/tmp/uartmode6", &filestat)) return 6;
 	return 0;
 }
 
@@ -2732,22 +2739,12 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 			hexdump(buf, 16, 0);
 			user_io_file_tx_data(buf, 512);
 
-			uint32_t rom_size = 0;
-			uint8_t *rom = snes_get_mirrored_rom(&f, &rom_size);
-			if (rom) {
-				uint32_t remaining = rom_size;
-				uint32_t sent = 0;
-				const uint32_t chunk_size = 4096;
-				while (remaining) {
-					uint32_t chunk = (remaining > chunk_size) ? chunk_size : remaining;
-					ProgressMessage("Loading", f.name, sent, rom_size);
-					user_io_file_tx_data(rom + sent, chunk);
-					sent += chunk;
-					remaining -= chunk;
-				}
-				free(rom);
+			//strip original SNES ROM header if present (not used)
+			if ((bytes2send % 1024) == 512)
+			{
+				bytes2send -= 512;
+				FileReadSec(&f, buf);
 			}
-			dosend = 0;
 		}
 	}
 

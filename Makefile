@@ -26,6 +26,41 @@ INCLUDE += -I./lib/libchdr/include
 INCLUDE += -I./lib/bluetooth
 INCLUDE += -I./lib/serial_server/library
 
+# rcheevos (optional — run lib/rcheevos/setup.sh to download)
+RCHEEVOS_DIR = ./lib/rcheevos
+ifneq ($(wildcard $(RCHEEVOS_DIR)/include/rc_client.h),)
+  INCLUDE += -I$(RCHEEVOS_DIR)/include -I$(RCHEEVOS_DIR)/src -I$(RCHEEVOS_DIR)/src/rcheevos
+  RCHEEVOS_DFLAGS = -DHAS_RCHEEVOS=1 -DRC_DISABLE_LUA=1
+  RCHEEVOS_SRC = \
+    $(RCHEEVOS_DIR)/src/rc_client.c \
+    $(RCHEEVOS_DIR)/src/rc_compat.c \
+    $(RCHEEVOS_DIR)/src/rc_util.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/alloc.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/condition.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/condset.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/consoleinfo.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/format.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/lboard.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/memref.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/operand.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/rc_validate.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/richpresence.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/runtime.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/runtime_progress.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/trigger.c \
+    $(RCHEEVOS_DIR)/src/rcheevos/value.c \
+    $(RCHEEVOS_DIR)/src/rapi/rc_api_common.c \
+    $(RCHEEVOS_DIR)/src/rapi/rc_api_info.c \
+    $(RCHEEVOS_DIR)/src/rapi/rc_api_runtime.c \
+    $(RCHEEVOS_DIR)/src/rapi/rc_api_user.c \
+    $(RCHEEVOS_DIR)/src/rhash/md5.c
+  $(info rcheevos library found — building with RetroAchievements support)
+else
+  RCHEEVOS_DFLAGS =
+  RCHEEVOS_SRC =
+  $(info rcheevos library not found — run lib/rcheevos/setup.sh to enable)
+endif
+
 BUILDDIR = bin
 
 PRJ = MiSTer
@@ -36,7 +71,8 @@ C_SRC =   $(wildcard *.c) \
 					$(wildcard ./lib/zstd/lib/common/*.c) \
 					$(wildcard ./lib/zstd/lib/decompress/*.c) \
           $(wildcard ./lib/libchdr/*.c) \
-          lib/libco/arm.c
+          lib/libco/arm.c \
+          $(RCHEEVOS_SRC)
 
 CPP_SRC = $(wildcard *.cpp) \
           $(wildcard ./lib/serial_server/library/*.cpp) \
@@ -49,7 +85,7 @@ IMLIB2_LIB  = -Llib/imlib2 -lfreetype -lbz2 -lpng16 -lz -lImlib2
 OBJ	= $(C_SRC:%.c=$(BUILDDIR)/%.c.o) $(CPP_SRC:%.cpp=$(BUILDDIR)/%.cpp.o) $(IMG:%.png=$(BUILDDIR)/%.png.o)
 DEP	= $(C_SRC:%.c=$(BUILDDIR)/%.c.d) $(CPP_SRC:%.cpp=$(BUILDDIR)/%.cpp.d)
 
-DFLAGS	= $(INCLUDE) -D_7ZIP_ST -DPACKAGE_VERSION=\"1.3.3\" -DHAVE_LROUND -DHAVE_STDINT_H -DHAVE_STDLIB_H -DHAVE_SYS_PARAM_H -DENABLE_64_BIT_WORDS=0 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE -DVDATE=\"`date +"%y%m%d"`\"
+DFLAGS	= $(INCLUDE) $(RCHEEVOS_DFLAGS) -D_7ZIP_ST -DPACKAGE_VERSION=\"1.3.3\" -DHAVE_LROUND -DHAVE_STDINT_H -DHAVE_STDLIB_H -DHAVE_SYS_PARAM_H -DENABLE_64_BIT_WORDS=0 -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE -DVDATE=\"`date +"%y%m%d"`\"
 CFLAGS	= $(DFLAGS) -Wall -Wextra -Wno-strict-aliasing -Wno-stringop-overflow -Wno-stringop-truncation -Wno-format-truncation -Wno-psabi -Wno-restrict -c
 LFLAGS	= -lc -lstdc++ -lm -lrt $(IMLIB2_LIB) -Llib/bluetooth -lbluetooth -lpthread
 
