@@ -209,7 +209,19 @@ static void execute_request(ra_http_req *req, ra_http_resp *resp)
 	off += snprintf(cmd + off, cmd_len - off, "'");
 	cmd[off] = '\0';
 
-	HTTP_LOG("CMD: %s", cmd);
+	// Log the command with token masked
+	{
+		const char *token_pos = strstr(cmd, "&t=");
+		if (token_pos) {
+			const char *token_end = strchr(token_pos + 3, '&');
+			if (!token_end) token_end = strchr(token_pos + 3, '\'');
+			if (!token_end) token_end = token_pos + 3 + strlen(token_pos + 3);
+			HTTP_LOG("CMD: %.*s&t=***%s",
+				(int)(token_pos - cmd), cmd, token_end);
+		} else {
+			HTTP_LOG("CMD: %s", cmd);
+		}
+	}
 
 	FILE *fp = popen(cmd, "r");
 	free(cmd);

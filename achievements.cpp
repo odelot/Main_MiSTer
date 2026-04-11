@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "achievements.h"
 #include "ra_ramread.h"
@@ -121,7 +122,28 @@ static uint32_t g_frames_skipped = 0;  // frames where busy flag was set
 static time_t g_load_time = 0;
 
 // Config file path
-#define RA_CFG_PATH "/media/fat/retroachievements.cfg"
+#define RA_CFG_PATH  "/media/fat/retroachievements.cfg"
+#define RA_SFX_PATH  "/media/fat/achievement.wav"
+
+// ---------------------------------------------------------------------------
+// Achievement Sound
+// ---------------------------------------------------------------------------
+
+static void *ra_play_thread(void *arg)
+{
+	(void)arg;
+	// Only play if the file exists — silent no-op otherwise
+	if (access(RA_SFX_PATH, R_OK) == 0)
+		system("aplay -q " RA_SFX_PATH " 2>/dev/null");
+	return NULL;
+}
+
+static void ra_play_achievement_sound(void)
+{
+	pthread_t th;
+	if (pthread_create(&th, NULL, ra_play_thread, NULL) == 0)
+		pthread_detach(th);
+}
 
 // ---------------------------------------------------------------------------
 // OSD Notification Queue
@@ -390,8 +412,23 @@ static void ra_server_call(const rc_api_request_t *request,
 		rc_resp.body = hr->body ? hr->body : "";
 		rc_resp.body_length = hr->body_len;
 
-		RA_LOG("HTTP response: status=%d body_len=%zu body=%.200s",
-			hr->http_status, hr->body_len, rc_resp.body);
+		// Log response body with token masked
+		{
+			char body_preview[220];
+			snprintf(body_preview, sizeof(body_preview), "%.200s", rc_resp.body);
+			// Mask "Token":"<value>" in response JSON
+			char *tp = strstr(body_preview, "\"Token\":\"");
+			if (tp) {
+				char *val_start = tp + 9; // skip "Token":"  (9 chars)
+				char *val_end = strchr(val_start, '"');
+				if (val_end) {
+					memmove(val_start + 3, val_end, strlen(val_end) + 1);
+					memcpy(val_start, "***", 3);
+				}
+			}
+			RA_LOG("HTTP response: status=%d body_len=%zu body=%s",
+				hr->http_status, hr->body_len, body_preview);
+		}
 
 		if (hr->http_status == 0) {
 			// curl failed entirely — mark as retryable
@@ -422,6 +459,7 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 				event->achievement->title,
 				event->achievement->description);
 			ra_notify(buf, 4000);
+			ra_play_achievement_sound();
 		}
 		break;
 
@@ -457,6 +495,7 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 	case RC_CLIENT_EVENT_GAME_COMPLETED:
 		RA_LOG("*** GAME COMPLETED! ***");
 		ra_notify("** GAME COMPLETED! **\n\nCongratulations!", 5000);
+		ra_play_achievement_sound();
 		break;
 
 	case RC_CLIENT_EVENT_SERVER_ERROR:
