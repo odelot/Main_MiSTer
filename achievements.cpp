@@ -24,6 +24,7 @@
 #include "rc_client.h"
 #include "rc_consoles.h"
 #include "rc_api_request.h"
+#include "rc_hash.h"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -105,6 +106,25 @@ static int g_mirror_validated = 0;   // DDRAM mirror has been validated at least
 static char g_rom_md5[33] = {};      // MD5 hex string of current ROM
 static char g_rom_path[1024] = {};   // Path to current ROM
 
+// SNES state
+static int g_snes_optionc = 0;       // 1 if FPGA has Option C protocol, 0 for VBlank-gated
+static int g_snes_collecting = 0;    // 1 during address collection do_frame
+static int g_snes_cache_ready = 0;   // 1 when FPGA response matches request
+static uint32_t g_snes_last_resp_frame = 0; // Last processed response frame
+static uint32_t g_snes_game_frames = 0;     // Frames processed since cache active
+static uint32_t g_snes_poll_logged = 0;     // Last g_snes_game_frames milestone logged
+static struct timespec g_snes_cache_time;   // Timestamp when cache became active
+
+// PSX state (uses same Option C infrastructure as SNES)
+static int g_psx_optionc = 0;
+static int g_psx_collecting = 0;
+static int g_psx_cache_ready = 0;
+static int g_psx_needs_recollect = 0; // pointer-resolution pass after boot
+static uint32_t g_psx_last_resp_frame = 0;
+static uint32_t g_psx_game_frames = 0;
+static uint32_t g_psx_poll_logged = 0;
+static struct timespec g_psx_cache_time;
+
 #ifdef HAS_RCHEEVOS
 static rc_client_t *g_client = NULL;
 #endif
@@ -163,6 +183,13 @@ static int s_notif_tail = 0;
 static int s_notif_showing = 0;
 static unsigned long s_notif_timer = 0;
 
+// Dedicated progress indicator slot — overwrites instead of queuing
+static char s_progress_text[NOTIF_TEXT_MAX] = {0};
+static int  s_progress_pending = 0;
+static int  s_progress_showing = 0;
+static unsigned long s_progress_timer = 0;
+static unsigned long s_progress_rate_timer = 0; // rate-limit OSD updates
+
 static void ra_notify(const char *text, int duration_ms = 3000)
 {
 	int count = s_notif_head - s_notif_tail;
@@ -177,11 +204,29 @@ static void ra_notify(const char *text, int duration_ms = 3000)
 	s_notif_head++;
 }
 
+// Urgent notifications (achievement unlocked, game completed) preempt any
+// currently showing progress indicator so they appear immediately.
+static void ra_notify_urgent(const char *text, int duration_ms = 4000)
+{
+	ra_notify(text, duration_ms);
+	if (s_progress_showing) {
+		s_progress_showing = 0;
+		s_notif_showing = 0;
+	}
+}
+
+static void ra_notify_progress(const char *text)
+{
+	// Overwrite — never queue. Progress is transient.
+	snprintf(s_progress_text, NOTIF_TEXT_MAX, "%s", text);
+	s_progress_pending = 1;
+}
+
 // Show queued notifications via Info() popup (called from achievements_poll)
 static void ra_osd_poll(void)
 {
-	// If currently showing, wait for timer to expire
-	if (s_notif_showing) {
+	// If a main notification is showing, wait for it to expire
+	if (s_notif_showing && !s_progress_showing) {
 		if (CheckTimer(s_notif_timer)) {
 			s_notif_showing = 0;
 		} else {
@@ -189,25 +234,51 @@ static void ra_osd_poll(void)
 		}
 	}
 
-	// Any notifications queued?
-	if (s_notif_head == s_notif_tail) return;
+	// If progress is showing at the bottom, check its timer and let it expire
+	// naturally — only ra_notify_urgent() can cut it off early
+	if (s_progress_showing) {
+		if (CheckTimer(s_progress_timer)) {
+			s_progress_showing = 0;
+			s_notif_showing = 0;
+		} else {
+			// Progress still running; don't show anything on top of it
+			// (progress is at the bottom, main queue is at the top —
+			//  they use different y positions so both can be "active"
+			//  from the OSD hardware perspective, but we still serialize
+			//  to avoid fighting over the OSD channel)
+			return;
+		}
+	}
 
 	// Don't show if menu is active (user is navigating)
 	if (menu_present()) return;
 
-	// Dequeue and display
-	ra_notif *n = &s_notif_queue[s_notif_tail % NOTIF_QUEUE_CAP];
-	s_notif_tail++;
+	// Priority 1: queued notifications (achievements, challenges, etc.) — shown at top
+	if (s_notif_head != s_notif_tail) {
+		ra_notif *n = &s_notif_queue[s_notif_tail % NOTIF_QUEUE_CAP];
+		s_notif_tail++;
 
-	// Info(text, timeout, width, height, frame)
-	// frame=1 draws a border. We give Info a slightly longer timeout than our
-	// own timer so the popup stays visible until we advance to the next one.
-	Info(n->text, n->duration_ms + 500, 0, 0, 1);
+		Info(n->text, n->duration_ms + 500, 0, 0, 1);
+		s_notif_timer = GetTimer(n->duration_ms);
+		s_notif_showing = 1;
 
-	s_notif_timer = GetTimer(n->duration_ms);
-	s_notif_showing = 1;
+		RA_LOG("OSD: Showing notification (%dms)", n->duration_ms);
+		return;
+	}
 
-	RA_LOG("OSD: Showing notification (%dms)", n->duration_ms);
+	// Priority 2: progress indicator — shown at bottom of screen (rate-limited to every 2s)
+	if (s_progress_pending) {
+		if (!s_progress_rate_timer || CheckTimer(s_progress_rate_timer)) {
+			InfoAt(s_progress_text, 2500, 200);
+			s_progress_timer = GetTimer(2000);
+			s_progress_rate_timer = GetTimer(2000);
+			s_progress_showing = 1;
+			s_notif_showing = 1;
+			s_progress_pending = 0;
+
+			RA_LOG("OSD: Showing progress");
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +331,13 @@ static int ra_calculate_rom_md5(const char *path, char *md5_hex_out)
 			skip, (rom_data[6] & 0x04) ? 1 : 0);
 		hash_data = rom_data + skip;
 		hash_size = file_size - skip;
+	}
+
+	// SNES: skip optional 512-byte SMC/SWC copier header
+	if ((file_size % 1024) == 512 && file_size > 512) {
+		RA_LOG("SNES SMC header detected (file_size %% 1024 == 512), skipping 512 bytes");
+		hash_data = rom_data + 512;
+		hash_size = file_size - 512;
 	}
 
 	struct MD5Context ctx;
@@ -338,6 +416,194 @@ static int ra_load_credentials(void)
 }
 
 // ---------------------------------------------------------------------------
+// SNES Option C VALCACHE diagnostic dump (uses RA_LOG)
+// ---------------------------------------------------------------------------
+static void snes_optionc_dump_valcache(const char *label)
+{
+	if (!g_ra_map) return;
+	const uint8_t *base = (const uint8_t *)g_ra_map;
+	int addr_count = ra_snes_addrlist_count();
+	const uint32_t *addrs = ra_snes_addrlist_addrs();
+
+	// Response header
+	const ra_val_resp_hdr_t *resp = (const ra_val_resp_hdr_t *)(base + RA_SNES_VALCACHE_OFFSET);
+	RA_LOG("DUMP[%s] VALCACHE hdr: resp_id=%u resp_frame=%u",
+		label, resp->response_id, resp->response_frame);
+
+	// Raw VALCACHE bytes (first 32)
+	const uint8_t *vals = base + RA_SNES_VALCACHE_OFFSET + 8;
+	int dump_len = addr_count < 32 ? addr_count : 32;
+	if (dump_len <= 0) dump_len = 32;
+	char hex[200];
+	int pos = 0;
+	int non_zero = 0;
+	for (int i = 0; i < dump_len && pos < (int)sizeof(hex) - 4; i++) {
+		pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", vals[i]);
+		if (vals[i]) non_zero++;
+	}
+	RA_LOG("DUMP[%s] VALCACHE raw[0..%d]: %s", label, dump_len - 1, hex);
+
+	// Count non-zero in full address range
+	int nz_all = 0;
+	for (int i = 0; i < addr_count; i++)
+		if (vals[i]) nz_all++;
+	RA_LOG("DUMP[%s] non-zero: %d/%d", label, nz_all, addr_count);
+
+	// Address+value pairs (first 10)
+	int show = addr_count < 10 ? addr_count : 10;
+	for (int i = 0; i < show; i++) {
+		RA_LOG("DUMP[%s]   [%d] addr=0x%05X val=0x%02X", label, i, addrs[i], vals[i]);
+	}
+	// Also show a few known SMW addresses if present
+	const uint32_t smw_addrs[] = {0x00019, 0x00DBF, 0x00F06, 0x00F31, 0x01490};
+	const char *smw_names[] = {"playerSts", "dragonCoin", "lives", "coinCnt", "score"};
+	for (int j = 0; j < 5; j++) {
+		for (int i = 0; i < addr_count; i++) {
+			if (addrs[i] == smw_addrs[j]) {
+				RA_LOG("DUMP[%s]   SMW:%s(0x%05X)=0x%02X", label, smw_names[j], smw_addrs[j], vals[i]);
+				break;
+			}
+		}
+	}
+
+	// ADDRLIST header readback
+	const ra_addr_req_hdr_t *ahdr = (const ra_addr_req_hdr_t *)(base + RA_SNES_ADDRLIST_OFFSET);
+	RA_LOG("DUMP[%s] ADDRLIST hdr readback: addr_count=%u request_id=%u",
+		label, ahdr->addr_count, ahdr->request_id);
+
+	// ADDRLIST address readback (first 5 from DDRAM)
+	const uint32_t *ddram_addrs = (const uint32_t *)(base + RA_SNES_ADDRLIST_OFFSET + 8);
+	int rshow = addr_count < 5 ? addr_count : 5;
+	for (int i = 0; i < rshow; i++) {
+		RA_LOG("DUMP[%s]   DDRAM_ADDR[%d]=0x%08X (local=0x%05X)", label, i, ddram_addrs[i], addrs[i]);
+	}
+
+	// FPGA debug word 1 at offset 0x10 (DDRAM_BASE + 2)
+	// Format: {ver(8), dispatch_cnt(8), first_dout(16), timeout_cnt(16), ok_cnt(16)}
+	const uint8_t *dbg8 = (const uint8_t *)(base + 0x10);
+	uint16_t ok_cnt      = dbg8[0] | (dbg8[1] << 8);
+	uint16_t timeout_cnt = dbg8[2] | (dbg8[3] << 8);
+	uint16_t first_dout  = dbg8[4] | (dbg8[5] << 8);
+	uint8_t  dispatch_cnt = dbg8[6];
+	uint8_t  fpga_ver     = dbg8[7];
+
+	// FPGA debug word 2 at offset 0x18 (DDRAM_BASE + 3)
+	// Format: {first_addr(16), wram_cnt(16), bsram_cnt(16), max_timeout(16)}
+	const uint8_t *dbg8b = (const uint8_t *)(base + 0x18);
+	uint16_t max_timeout  = dbg8b[0] | (dbg8b[1] << 8);
+	uint16_t bsram_cnt    = dbg8b[2] | (dbg8b[3] << 8);
+	uint16_t wram_cnt     = dbg8b[4] | (dbg8b[5] << 8);
+	uint16_t first_addr   = dbg8b[6] | (dbg8b[7] << 8);
+
+	RA_LOG("DUMP[%s] FPGA_DBG: ver=0x%02X ok=%u timeout=%u first_dout=0x%04X dispatch=%u",
+		label, fpga_ver, ok_cnt, timeout_cnt, first_dout, dispatch_cnt);
+	RA_LOG("DUMP[%s] FPGA_DBG2: wram=%u bsram=%u first_addr=0x%04X max_timeout=%u",
+		label, wram_cnt, bsram_cnt, first_addr, max_timeout);
+	if (fpga_ver != 0x0A) {
+		RA_LOG("DUMP[%s] *** WARNING: FPGA version mismatch! Expected 0x0A, got 0x%02X ***",
+			label, fpga_ver);
+		RA_LOG("DUMP[%s] *** The FPGA bitstream may be outdated. Recompile and redeploy .rbf ***",
+			label);
+	}
+
+	// Bypass pattern verification: FPGA sets val = addr[7:0] ^ 0xA5
+	if (addr_count > 0 && addrs) {
+		int bypass_match = 0, bypass_mismatch = 0;
+		for (int i = 0; i < addr_count; i++) {
+			uint8_t expected = (uint8_t)(addrs[i] & 0xFF) ^ 0xA5;
+			if (vals[i] == expected)
+				bypass_match++;
+			else
+				bypass_mismatch++;
+		}
+		RA_LOG("DUMP[%s] BYPASS_CHECK: match=%d mismatch=%d (expected addr[7:0]^0xA5)",
+			label, bypass_match, bypass_mismatch);
+		if (bypass_mismatch > 0 && bypass_mismatch <= 5) {
+			for (int i = 0; i < addr_count && bypass_mismatch > 0; i++) {
+				uint8_t expected = (uint8_t)(addrs[i] & 0xFF) ^ 0xA5;
+				if (vals[i] != expected) {
+					RA_LOG("DUMP[%s]   MISMATCH[%d] addr=0x%05X got=0x%02X expected=0x%02X",
+						label, i, addrs[i], vals[i], expected);
+					bypass_mismatch--;
+				}
+			}
+		}
+	}
+}
+
+static void psx_optionc_dump_valcache(const char *label)
+{
+	if (!g_ra_map) return;
+	const uint8_t *base = (const uint8_t *)g_ra_map;
+	int addr_count = ra_snes_addrlist_count();
+	const uint32_t *addrs = ra_snes_addrlist_addrs();
+
+	// Response header
+	const ra_val_resp_hdr_t *resp = (const ra_val_resp_hdr_t *)(base + RA_SNES_VALCACHE_OFFSET);
+	RA_LOG("DUMP[%s] VALCACHE hdr: resp_id=%u resp_frame=%u",
+		label, resp->response_id, resp->response_frame);
+
+	// Raw VALCACHE bytes (first 32)
+	const uint8_t *vals = base + RA_SNES_VALCACHE_OFFSET + 8;
+	int dump_len = addr_count < 32 ? addr_count : 32;
+	if (dump_len <= 0) dump_len = 32;
+	char hex[200];
+	int pos = 0;
+	for (int i = 0; i < dump_len && pos < (int)sizeof(hex) - 4; i++) {
+		pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", vals[i]);
+	}
+	RA_LOG("DUMP[%s] VALCACHE raw[0..%d]: %s", label, dump_len - 1, hex);
+
+	// Count non-zero in full address range
+	int nz_all = 0;
+	for (int i = 0; i < addr_count; i++)
+		if (vals[i]) nz_all++;
+	RA_LOG("DUMP[%s] non-zero: %d/%d", label, nz_all, addr_count);
+
+	// Address+value pairs (first 16)
+	int show = addr_count < 16 ? addr_count : 16;
+	for (int i = 0; i < show; i++) {
+		RA_LOG("DUMP[%s]   [%d] addr=0x%06X val=0x%02X", label, i, addrs[i], vals[i]);
+	}
+
+	// Check THPS achievement-relevant addresses
+	const uint32_t thps_addrs[] = {0x0a5be0, 0x0d17c8, 0x0d1414, 0x0d1410, 0x0a42f4, 0x0d16a4};
+	const char *thps_names[] = {"gameState", "ptrBase", "check1", "check2", "check3", "levelState"};
+	for (int j = 0; j < 6; j++) {
+		for (int i = 0; i < addr_count; i++) {
+			if (addrs[i] == thps_addrs[j]) {
+				RA_LOG("DUMP[%s]   THPS:%s(0x%06X)=0x%02X", label, thps_names[j], thps_addrs[j], vals[i]);
+				break;
+			}
+		}
+	}
+
+	// ADDRLIST header readback
+	const ra_addr_req_hdr_t *ahdr = (const ra_addr_req_hdr_t *)(base + RA_SNES_ADDRLIST_OFFSET);
+	RA_LOG("DUMP[%s] ADDRLIST hdr readback: addr_count=%u request_id=%u",
+		label, ahdr->addr_count, ahdr->request_id);
+
+	// FPGA debug words (same layout as SNES mirror)
+	const uint8_t *dbg8 = (const uint8_t *)(base + 0x10);
+	uint16_t ok_cnt      = dbg8[0] | (dbg8[1] << 8);
+	uint16_t timeout_cnt = dbg8[2] | (dbg8[3] << 8);
+	uint16_t first_dout  = dbg8[4] | (dbg8[5] << 8);
+	uint8_t  dispatch_cnt = dbg8[6];
+	uint8_t  fpga_ver     = dbg8[7];
+
+	const uint8_t *dbg8b = (const uint8_t *)(base + 0x18);
+	uint16_t max_timeout  = dbg8b[0] | (dbg8b[1] << 8);
+	uint16_t first_addr   = dbg8b[6] | (dbg8b[7] << 8);
+
+	RA_LOG("DUMP[%s] FPGA_DBG: ver=0x%02X ok=%u timeout=%u first_dout=0x%04X dispatch=%u max_timeout=%u first_addr=0x%04X",
+		label, fpga_ver, ok_cnt, timeout_cnt, first_dout, dispatch_cnt, max_timeout, first_addr);
+	if (fpga_ver != 0x01) {
+		RA_LOG("DUMP[%s] *** WARNING: FPGA version mismatch! Expected 0x01, got 0x%02X ***",
+			label, fpga_ver);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // rcheevos callbacks (compiled only if library is available)
 // ---------------------------------------------------------------------------
 
@@ -349,9 +615,51 @@ static uint32_t ra_read_memory(uint32_t address, uint8_t *buffer,
 	(void)client;
 	if (!g_ra_map || !ra_ramread_active(g_ra_map)) {
 		memset(buffer, 0, num_bytes);
-		return num_bytes;
+		return 0;
 	}
-	return ra_ramread_nes_read(g_ra_map, address, buffer, num_bytes);
+
+	int console = ra_get_console_id();
+	switch (console) {
+		case 3:  // RC_CONSOLE_SUPER_NINTENDO
+			if (g_snes_optionc) {
+				// Option C: selective address reading
+				if (g_snes_collecting) {
+					for (uint32_t i = 0; i < num_bytes; i++)
+						ra_snes_addrlist_add(address + i);
+				}
+				if (g_snes_cache_ready) {
+					for (uint32_t i = 0; i < num_bytes; i++)
+						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
+					return num_bytes;
+				}
+				memset(buffer, 0, num_bytes);
+				return num_bytes;
+			} else {
+				// VBlank-gated: read from full WRAM mirror
+				return ra_ramread_snes_read(g_ra_map, address, buffer, num_bytes);
+			}
+		case 7:  // RC_CONSOLE_NINTENDO (NES)
+			return ra_ramread_nes_read(g_ra_map, address, buffer, num_bytes);
+		case 12: // RC_CONSOLE_PLAYSTATION (PSX)
+			if (g_psx_optionc) {
+				if (g_psx_collecting) {
+					for (uint32_t i = 0; i < num_bytes; i++)
+						ra_snes_addrlist_add(address + i);
+				}
+				if (g_psx_cache_ready) {
+					for (uint32_t i = 0; i < num_bytes; i++)
+						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
+					return num_bytes;
+				}
+				memset(buffer, 0, num_bytes);
+				return num_bytes;
+			}
+			memset(buffer, 0, num_bytes);
+			return num_bytes;
+		default:
+			memset(buffer, 0, num_bytes);
+			return num_bytes;
+	}
 }
 
 static void ra_server_call(const rc_api_request_t *request,
@@ -456,7 +764,7 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 				">> ACHIEVEMENT <<\n\n%s\n%s",
 				event->achievement->title,
 				event->achievement->description);
-			ra_notify(buf, 4000);
+			ra_notify_urgent(buf, 4000);
 			ra_play_achievement_sound();
 		}
 		break;
@@ -484,15 +792,16 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 			RA_LOG("PROGRESS: %s", event->achievement->measured_progress);
 			char buf[NOTIF_TEXT_MAX];
 			snprintf(buf, sizeof(buf),
-				"Progress: %s",
+				"%s\n\nProgress: %s",
+				event->achievement->title,
 				event->achievement->measured_progress);
-			ra_notify(buf, 2000);
+			ra_notify_progress(buf);
 		}
 		break;
 
 	case RC_CLIENT_EVENT_GAME_COMPLETED:
 		RA_LOG("*** GAME COMPLETED! ***");
-		ra_notify("** GAME COMPLETED! **\n\nCongratulations!", 5000);
+		ra_notify_urgent("** GAME COMPLETED! **\n\nCongratulations!", 5000);
 		ra_play_achievement_sound();
 		break;
 
@@ -640,10 +949,16 @@ static int ra_core_supported(void)
 // Public API
 // ---------------------------------------------------------------------------
 
+static void ra_hash_message(const char *msg)
+{
+	RA_LOG("HASH: %s", msg);
+}
+
 void achievements_init(void)
 {
 	ra_log_open();
 	RA_LOG("=== RetroAchievements for MiSTer ===");
+	RA_LOG("Build: OptionC v12-psx (2026-04-12)");
 	RA_LOG("Phase 3 — Full pipeline: HTTP + login + achievements");
 
 	const char *core = user_io_get_core_name(1);
@@ -655,6 +970,14 @@ void achievements_init(void)
 		RA_LOG("Core not supported for RetroAchievements. Inactive.");
 		return;
 	}
+
+#ifdef HAS_RCHEEVOS
+	// Initialize rcheevos hash infrastructure (needed for disc-based consoles)
+	rc_hash_init_default_cdreader();
+	rc_hash_init_custom_filereader(NULL); // use default stdio-based reader
+	rc_hash_init_error_message_callback(ra_hash_message);
+	rc_hash_init_verbose_message_callback(ra_hash_message);
+#endif
 
 	// Map DDRAM mirror region
 	g_ra_map = ra_ramread_map();
@@ -730,10 +1053,33 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 	// Store ROM path
 	snprintf(g_rom_path, sizeof(g_rom_path), "%s", rom_path);
 
-	// Calculate MD5
+	// Calculate hash
 	g_rom_md5[0] = '\0';
 	if (rom_path && rom_path[0]) {
-		ra_calculate_rom_md5(rom_path, g_rom_md5);
+		int console_id = ra_get_console_id();
+#ifdef HAS_RCHEEVOS
+		// For disc-based consoles (PSX, Saturn, etc.), use rcheevos hash
+		// which understands disc image formats (.cue/.bin, .chd, .iso)
+		if (console_id == 12) { // RC_CONSOLE_PLAYSTATION
+			// Build absolute path — rom_path is relative to getRootDir()
+			char abs_path[1024];
+			if (rom_path[0] == '/') {
+				snprintf(abs_path, sizeof(abs_path), "%s", rom_path);
+			} else {
+				snprintf(abs_path, sizeof(abs_path), "%s/%s", getRootDir(), rom_path);
+			}
+			RA_LOG("Using rcheevos disc hash for PSX: %s", abs_path);
+			if (rc_hash_generate_from_file(g_rom_md5, console_id, abs_path)) {
+				RA_LOG("PSX disc hash: %s", g_rom_md5);
+			} else {
+				RA_LOG("ERROR: rc_hash_generate_from_file failed for PSX");
+				g_rom_md5[0] = '\0';
+			}
+		} else
+#endif
+		{
+			ra_calculate_rom_md5(rom_path, g_rom_md5);
+		}
 	}
 
 	// Reset frame tracking
@@ -744,6 +1090,20 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 	g_frames_skipped = 0;
 	g_game_loaded = 0;
 	g_load_time = time(NULL);
+	g_snes_optionc = 0;
+	g_snes_collecting = 0;
+	g_snes_cache_ready = 0;
+	g_snes_last_resp_frame = 0;
+	g_snes_game_frames = 0;
+	g_snes_poll_logged = 0;
+	g_psx_optionc = 0;
+	g_psx_collecting = 0;
+	g_psx_cache_ready = 0;
+	g_psx_needs_recollect = 0;
+	g_psx_last_resp_frame = 0;
+	g_psx_game_frames = 0;
+	g_psx_poll_logged = 0;
+	ra_snes_addrlist_init();
 
 	// Check mirror state
 	if (g_ra_map && ra_ramread_active(g_ra_map)) {
@@ -792,6 +1152,33 @@ void achievements_poll(void)
 			g_mirror_validated = 1;
 			RA_LOG("=== DDRAM Mirror Activated! ===");
 			ra_ramread_debug_dump(g_ra_map);
+
+			// Detect FPGA protocol: region_count==0 means Option C, non-zero means VBlank-gated
+			const ra_header_t *hdr = (const ra_header_t *)g_ra_map;
+			if (ra_get_console_id() == 3) {
+				if (hdr->region_count == 0) {
+					g_snes_optionc = 1;
+					RA_LOG("SNES FPGA protocol: Option C (selective address reading)");
+				} else {
+					g_snes_optionc = 0;
+					RA_LOG("SNES FPGA protocol: VBlank-gated full mirror (region_count=%d)", hdr->region_count);
+				}
+			}
+			if (ra_get_console_id() == 12) {
+				g_psx_optionc = 1;
+				RA_LOG("PSX FPGA protocol: Option C (selective address reading)");
+			}
+		} else {
+			// Periodic debug while waiting for FPGA mirror
+			static uint32_t wait_count = 0;
+			if ((++wait_count % 18000) == 1) {
+				const uint8_t *p = (const uint8_t *)g_ra_map;
+				RA_LOG("Waiting for mirror... raw header: "
+					"%02X %02X %02X %02X  %02X %02X %02X %02X  "
+					"%02X %02X %02X %02X  %02X %02X %02X %02X",
+					p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
+					p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
+			}
 		}
 		return;
 	}
@@ -802,29 +1189,251 @@ void achievements_poll(void)
 
 	// Periodic diagnostics every ~5s (assuming poll is called frequently)
 	if ((poll_calls % 18000) == 1) {
-		RA_LOG("DIAG: poll_calls=%u frame=%u last_frame=%u busy=%d processed=%u skipped=%u game_loaded=%d",
-			poll_calls, frame, g_last_frame, busy, g_frames_processed, g_frames_skipped, g_game_loaded);
+		int console = ra_get_console_id();
+		int optionc = (console == 12) ? g_psx_optionc : g_snes_optionc;
+		RA_LOG("DIAG: poll_calls=%u frame=%u last_frame=%u busy=%d processed=%u skipped=%u game_loaded=%d console=%d optionc=%d",
+			poll_calls, frame, g_last_frame, busy, g_frames_processed, g_frames_skipped, g_game_loaded,
+			console, optionc);
 
-		// Dump first 32 bytes of CPU-RAM region to verify data is arriving
-		const uint8_t *cpuram = ra_ramread_region_data(g_ra_map, 0);
-		uint16_t cpuram_sz = ra_ramread_region_size(g_ra_map, 0);
-		if (cpuram && cpuram_sz > 0) {
-			int n = cpuram_sz < 32 ? cpuram_sz : 32;
+		if (console == 3 && g_snes_optionc) {
+			// SNES Option C: show address cache status
+			RA_LOG("SNES OptionC: addrs=%d cache=%s resp_frame=%u",
+				ra_snes_addrlist_count(),
+				g_snes_cache_ready ? "active" : "waiting",
+				ra_snes_addrlist_response_frame(g_ra_map));
+		} else if (console == 3) {
+			// SNES VBlank-gated: show WRAM data
+			const uint8_t *base = (const uint8_t *)g_ra_map;
+			const uint8_t *wram = base + RA_SNES_WRAM_OFFSET;
 			char hex[200];
 			int pos = 0;
-			for (int i = 0; i < n && pos < (int)sizeof(hex) - 4; i++)
-				pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", cpuram[i]);
-			RA_LOG("RAM[0..%d]: %s", n - 1, hex);
+			for (int i = 0; i < 32 && pos < (int)sizeof(hex) - 4; i++)
+				pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", wram[i]);
+			RA_LOG("WRAM[0..31]: %s", hex);
+			const ra_header_t *hdr = (const ra_header_t *)base;
+			RA_LOG("BSRAM size=%u", hdr->reserved2);
+		} else if (console == 12 && g_psx_optionc) {
+			// PSX Option C: show address cache status
+			RA_LOG("PSX OptionC: addrs=%d cache=%s resp_frame=%u game_frames=%u",
+				ra_snes_addrlist_count(),
+				g_psx_cache_ready ? "active" : "waiting",
+				ra_snes_addrlist_response_frame(g_ra_map),
+				g_psx_game_frames);
 		} else {
-			RA_LOG("RAM: region 0 not available (ptr=%p sz=%u)", cpuram, cpuram_sz);
+			// NES: region-based layout
+			const uint8_t *cpuram = ra_ramread_region_data(g_ra_map, 0);
+			uint16_t cpuram_sz = ra_ramread_region_size(g_ra_map, 0);
+			if (cpuram && cpuram_sz > 0) {
+				int n = cpuram_sz < 32 ? cpuram_sz : 32;
+				char hex[200];
+				int pos = 0;
+				for (int i = 0; i < n && pos < (int)sizeof(hex) - 4; i++)
+					pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", cpuram[i]);
+				RA_LOG("RAM[0..%d]: %s", n - 1, hex);
+			} else {
+				RA_LOG("RAM: region 0 not available (ptr=%p sz=%u)", cpuram, cpuram_sz);
+			}
 		}
 	}
 
-	// NOTE: Busy flag is currently ignored because some cores keep it permanently
-	// set. We process frames regardless. If data corruption is observed, we can
-	// revisit this and add a short-lived busy check (e.g., skip only if busy was
-	// set for less than N polls).
 	(void)busy;
+
+#ifdef HAS_RCHEEVOS
+	// ================================================================
+	// SNES: Option C — selective address reading
+	// ================================================================
+	if (g_client && g_game_loaded && ra_get_console_id() == 3 && g_snes_optionc) {
+		if (ra_snes_addrlist_count() == 0 && !g_snes_cache_ready) {
+			// Bootstrap: run one do_frame with zeros to discover needed addresses
+			g_snes_collecting = 1;
+			ra_snes_addrlist_begin_collect();
+			rc_client_do_frame(g_client);
+			g_snes_collecting = 0;
+			int changed = ra_snes_addrlist_end_collect(g_ra_map);
+			if (changed) {
+				RA_LOG("SNES OptionC: Bootstrap collection done, %d addrs written to DDRAM",
+					ra_snes_addrlist_count());
+				snes_optionc_dump_valcache("bootstrap");
+			} else {
+				RA_LOG("SNES OptionC: No addresses collected — achievements may have no memory refs");
+			}
+		} else if (!g_snes_cache_ready) {
+			// Wait for FPGA to respond with cached values
+			if (ra_snes_addrlist_is_ready(g_ra_map)) {
+				g_snes_cache_ready = 1;
+				g_snes_last_resp_frame = 0;
+				g_snes_game_frames = 0;
+				g_snes_poll_logged = 0;
+				clock_gettime(CLOCK_MONOTONIC, &g_snes_cache_time);
+				RA_LOG("SNES OptionC: Cache active! FPGA response matched request.");
+				snes_optionc_dump_valcache("cache-active");
+			}
+		} else {
+			// Normal frame processing from cache
+			uint32_t resp_frame = ra_snes_addrlist_response_frame(g_ra_map);
+			if (resp_frame > g_snes_last_resp_frame) {
+				g_snes_last_resp_frame = resp_frame;
+				g_frames_processed++;
+				g_snes_game_frames++;
+
+				// Dump first 5 frames after cache became active
+				if (g_snes_game_frames <= 5) {
+					RA_LOG("SNES OptionC: GameFrame %u (resp_frame=%u)",
+						g_snes_game_frames, resp_frame);
+					snes_optionc_dump_valcache("early-frame");
+				}
+
+				// Periodically re-collect to catch address changes (every ~5 min)
+				int re_collect = (g_snes_game_frames % 18000 == 0) && (g_snes_game_frames > 0);
+				if (re_collect) {
+					g_snes_collecting = 1;
+					ra_snes_addrlist_begin_collect();
+				}
+
+				rc_client_do_frame(g_client);
+
+				if (re_collect) {
+					g_snes_collecting = 0;
+					if (ra_snes_addrlist_end_collect(g_ra_map)) {
+						RA_LOG("SNES OptionC: Address list refreshed, %d addrs",
+							ra_snes_addrlist_count());
+					}
+				}
+			}
+		}
+
+		// Periodic SNES debug — log once per 300-frame milestone
+		uint32_t milestone = g_snes_game_frames / 300;
+		if (milestone > 0 && milestone != g_snes_poll_logged) {
+			g_snes_poll_logged = milestone;
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			double elapsed = (now.tv_sec - g_snes_cache_time.tv_sec)
+				+ (now.tv_nsec - g_snes_cache_time.tv_nsec) / 1e9;
+			double ms_per_cycle = (g_snes_game_frames > 0) ?
+				(elapsed * 1000.0 / g_snes_game_frames) : 0.0;
+			RA_LOG("POLL(SNES): resp_frame=%u game_frames=%u elapsed=%.1fs ms/cycle=%.1f addrs=%d",
+				g_snes_last_resp_frame, g_snes_game_frames, elapsed, ms_per_cycle,
+				ra_snes_addrlist_count());
+			// Also dump VALCACHE every 1800 game frames (~30s)
+			if ((g_snes_game_frames % 1800) < 300) {
+				snes_optionc_dump_valcache("periodic");
+			}
+		}
+		return; // SNES handled — skip default frame tracking
+	}
+
+	// ================================================================
+	// PSX: Option C — selective address reading
+	// ================================================================
+	if (g_client && g_game_loaded && ra_get_console_id() == 12 && g_psx_optionc) {
+		if (ra_snes_addrlist_count() == 0 && !g_psx_cache_ready) {
+			// Phase 1: Bootstrap — collect addresses with zero values
+			g_psx_collecting = 1;
+			ra_snes_addrlist_begin_collect();
+			rc_client_do_frame(g_client);
+			g_psx_collecting = 0;
+			int changed = ra_snes_addrlist_end_collect(g_ra_map);
+			if (changed) {
+				g_psx_needs_recollect = 1; // schedule pointer-resolution pass
+				RA_LOG("PSX OptionC: Bootstrap collection done, %d addrs written to DDRAM",
+					ra_snes_addrlist_count());
+				psx_optionc_dump_valcache("bootstrap");
+			} else {
+				RA_LOG("PSX OptionC: No addresses collected");
+			}
+		} else if (!g_psx_cache_ready) {
+			// Phase 2/4: Wait for FPGA cache
+			if (ra_snes_addrlist_is_ready(g_ra_map)) {
+				g_psx_cache_ready = 1;
+				g_psx_last_resp_frame = 0;
+				g_psx_game_frames = 0;
+				g_psx_poll_logged = 0;
+				clock_gettime(CLOCK_MONOTONIC, &g_psx_cache_time);
+				if (g_psx_needs_recollect) {
+					RA_LOG("PSX OptionC: Cache active (pre-recollect). Will resolve pointers.");
+					psx_optionc_dump_valcache("pre-recollect");
+				} else {
+					RA_LOG("PSX OptionC: Cache active! FPGA response matched request.");
+					psx_optionc_dump_valcache("cache-active");
+				}
+			}
+		} else if (g_psx_needs_recollect) {
+			// Phase 3: Pointer-resolution re-collection
+			// Now that cache has real values, AddAddress conditions will
+			// compute correct derived addresses from pointer base values.
+			g_psx_needs_recollect = 0;
+			g_psx_collecting = 1;
+			ra_snes_addrlist_begin_collect();
+			rc_client_do_frame(g_client);
+			g_psx_collecting = 0;
+			int changed = ra_snes_addrlist_end_collect(g_ra_map);
+			if (changed) {
+				RA_LOG("PSX OptionC: Pointer-resolve re-collection done, %d addrs (was different!)",
+					ra_snes_addrlist_count());
+				g_psx_cache_ready = 0; // wait for new FPGA data with correct addresses
+				psx_optionc_dump_valcache("ptr-resolve");
+			} else {
+				RA_LOG("PSX OptionC: Pointer-resolve complete, no address changes");
+			}
+		} else {
+			// Phase 5: Normal frame processing
+			uint32_t resp_frame = ra_snes_addrlist_response_frame(g_ra_map);
+			if (resp_frame > g_psx_last_resp_frame) {
+				g_psx_last_resp_frame = resp_frame;
+				g_last_frame = resp_frame;
+				g_frames_processed++;
+				g_psx_game_frames++;
+
+				if (g_psx_game_frames <= 5) {
+					RA_LOG("PSX OptionC: GameFrame %u (resp_frame=%u)",
+						g_psx_game_frames, resp_frame);
+					psx_optionc_dump_valcache("early-frame");
+				}
+
+				// Re-collect every 600 frames (~10s) to track pointer changes
+				int re_collect = (g_psx_game_frames % 600 == 0) && (g_psx_game_frames > 0);
+				if (re_collect) {
+					g_psx_collecting = 1;
+					ra_snes_addrlist_begin_collect();
+				}
+
+				rc_client_do_frame(g_client);
+
+				if (re_collect) {
+					g_psx_collecting = 0;
+					if (ra_snes_addrlist_end_collect(g_ra_map)) {
+						RA_LOG("PSX OptionC: Address list refreshed, %d addrs",
+							ra_snes_addrlist_count());
+						g_psx_cache_ready = 0; // wait for new FPGA data
+					}
+				}
+			}
+		}
+
+		uint32_t milestone = g_psx_game_frames / 300;
+		if (milestone > 0 && milestone != g_psx_poll_logged) {
+			g_psx_poll_logged = milestone;
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			double elapsed = (now.tv_sec - g_psx_cache_time.tv_sec)
+				+ (now.tv_nsec - g_psx_cache_time.tv_nsec) / 1e9;
+			double ms_per_cycle = (g_psx_game_frames > 0) ?
+				(elapsed * 1000.0 / g_psx_game_frames) : 0.0;
+			RA_LOG("POLL(PSX): resp_frame=%u game_frames=%u elapsed=%.1fs ms/cycle=%.1f addrs=%d",
+				g_psx_last_resp_frame, g_psx_game_frames, elapsed, ms_per_cycle,
+				ra_snes_addrlist_count());
+			if ((g_psx_game_frames % 1800) < 300) {
+				psx_optionc_dump_valcache("periodic");
+			}
+		}
+		return; // PSX handled
+	}
+#endif
+
+	// ================================================================
+	// Default frame tracking (NES and other cores)
+	// ================================================================
 
 	if (frame == g_last_frame) {
 		// Frame counter not advancing — still run rc_client_do_frame at a
@@ -911,8 +1520,15 @@ void achievements_unload_game(void)
 	g_game_load_pending = 0;
 	g_last_frame = 0;
 	g_mirror_validated = 0;
+	g_snes_optionc = 0;
 	g_rom_md5[0] = '\0';
 	g_rom_path[0] = '\0';
+	g_snes_collecting = 0;
+	g_snes_cache_ready = 0;
+	g_snes_last_resp_frame = 0;
+	g_snes_game_frames = 0;
+	g_snes_poll_logged = 0;
+	ra_snes_addrlist_init();
 
 	// Clear pending notifications
 	s_notif_head = s_notif_tail = 0;

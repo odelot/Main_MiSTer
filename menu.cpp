@@ -2704,6 +2704,7 @@ void HandleUI(void)
 			{
 				psx_mount_cd(user_io_ext_idx(selPath, fs_pFileExt) << 6 | (menusub + 1), ioctl_index, selPath);
 				cheats_init(selPath, 0);
+				achievements_load_game(selPath, 0);
 			}
 			else if (is_cdi())
 			{
@@ -7859,6 +7860,21 @@ void Info(const char *message, int timeout, int width, int height, int frame)
 	{
 		OSD_PrintInfo(message, &width, &height, frame);
 		InfoEnable(20, (cfg.direct_video && get_vga_fb()) ? 30 : 10, width, height);
+		OsdSetSize(16);
+
+		menu_timer = GetTimer(timeout);
+		menustate = MENU_INFO;
+		OsdUpdate();
+	}
+}
+
+void InfoAt(const char *message, int timeout, int y_pos, int frame)
+{
+	if (menustate <= MENU_INFO)
+	{
+		int width = 0, height = 0;
+		OSD_PrintInfo(message, &width, &height, frame);
+		InfoEnable(20, y_pos, width, height);
 		OsdSetSize(16);
 
 		menu_timer = GetTimer(timeout);

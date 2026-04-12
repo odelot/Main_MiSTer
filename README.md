@@ -2,14 +2,22 @@
 
 This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-devel/Main_MiSTer) with **RetroAchievements** support for MiSTer FPGA.
 
-> **Status:** Experimental / Proof of Concept — currently only the **NES** core is supported.
+> **Status:** Experimental / Proof of Concept — currently the **NES**, **SNES**, and **PSX** cores are supported.
+
+## Supported Cores
+
+| Core | Console ID | Modified Core Repo |
+|------|-----------|--------------------|
+| NES | 7 | [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) |
+| SNES | 3 | [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer) |
+| PSX | 12 | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
 
 ## What's Different from the Original
 
 The upstream Main_MiSTer binary manages cores, user input, video output, and the OSD menu on the MiSTer platform. This fork adds a full RetroAchievements integration layer on top of that, without modifying any existing core functionality. The following files were **added**:
 
 | File | Purpose |
-|------|---------|
+|------|--------|
 | `achievements.cpp / .h` | Lifecycle management — init, load game, per-frame poll, unload, OSD popups |
 | `ra_http.cpp / .h` | Async HTTP worker thread that executes RetroAchievements API calls via `curl` |
 | `ra_ramread.cpp / .h` | Reads emulated console RAM from the DDRAM mirror written by the FPGA core |
@@ -32,8 +40,8 @@ The RetroAchievements integration uses a four-layer pipeline:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  FPGA Core (NES_MiSTer)                         │
-│  ra_ram_mirror.sv copies emulated RAM to DDRAM   │
+│  FPGA Core (NES / SNES / PSX)                   │
+│  ra_ram_mirror*.sv exposes emulated RAM to DDRAM  │
 │  every VBlank (~60 Hz)                           │
 └──────────────────┬──────────────────────────────┘
                    │  DDRAM at physical 0x3D000000
@@ -41,7 +49,7 @@ The RetroAchievements integration uses a four-layer pipeline:
 ┌─────────────────────────────────────────────────┐
 │  ARM Binary (this repo)                          │
 │  shmem.cpp  — mmap /dev/mem to read DDRAM        │
-│  ra_ramread — parse header, map NES addresses     │
+│  ra_ramread — parse header, map console addresses │
 └──────────────────┬──────────────────────────────┘
                    │
                    ▼
@@ -60,25 +68,45 @@ The RetroAchievements integration uses a four-layer pipeline:
 
 ### DDRAM Mirror Layout
 
-The FPGA core writes a structured block at physical address `0x3D000000`:
+Every supported core writes a structured block at ARM physical address `0x3D000000`:
 
 | Offset | Content |
 |--------|---------|
-| `0x00` | Magic `0x52414348` ("RACH") |
-| `0x04` | Region count + flags (busy bit) |
-| `0x08` | Frame counter (increments each VBlank) |
-| `0x10+` | Region descriptors (source addr, size, DDRAM offset) |
-| `0x100+` | Actual RAM data (8-byte aligned) |
+| `0x00000` | Header: magic `"RACH"`, region count, flags (busy bit), frame counter |
+| `0x00100+` | RAM data area (layout varies per core) |
+| `0x40000` | Address request list — ARM writes here (Option C protocol) |
+| `0x48000` | Value response cache — FPGA writes results here |
 
-For NES, two regions are exposed:
-- **CPU-RAM** ($0000–$07FF) — 2 KB
-- **Cart SRAM** ($6000–$7FFF) — 8 KB
+### Per-Core RAM Exposure Strategy
+
+#### NES — Full Mirror (`ra_ram_mirror.sv`)
+The FPGA copies all relevant RAM to DDRAM on every VBlank (~10 KB total):
+- **CPU-RAM** ($0000–$07FF) — 2 KB at DDRAM offset `0x100`
+- **Cart SRAM** ($6000–$7FFF) — 8 KB at DDRAM offset `0x900`
+
+#### SNES — Selective Address Protocol (`ra_ram_mirror_snes.sv`)
+Due to the larger RAM space, the ARM binary writes the list of addresses it needs, and the FPGA reads only those (~185 per frame, ~30 µs overhead):
+- **WRAM** ($000000–$01FFFF) — 128 KB, mirrored at DDRAM offset `0x100`
+- **BSRAM** ($020000+) — up to 256 KB, mirrored at DDRAM offset `0x20100`
+
+#### PSX — Selective Address Protocol (`ra_ram_mirror_psx.sv`)
+Same request/response protocol as SNES. The FPGA reads requested addresses from SDRAM via a dedicated channel (CH4):
+- **Main RAM** ($000000–$1FFFFF) — 2 MB, byte-addressed linearly
+- Values returned via DDRAM offset `0x48000` response cache
+
+### ROM / Disc Hashing
+
+| Core | Method |
+|------|--------|
+| NES | MD5 of ROM data, skipping 16-byte iNES header and optional 512-byte trainer |
+| SNES | MD5 of ROM data, skipping optional 512-byte SMC/SWC copier header (detected when `file_size % 1024 == 512`) |
+| PSX | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, and `.iso` disc images natively |
 
 ### How It Works
 
 1. **On startup**, the binary loads credentials from `retroachievements.cfg`, initializes the rcheevos client, and logs in asynchronously.
-2. **When a ROM is loaded**, the binary computes an MD5 hash (skipping the iNES header for NES ROMs) and sends it to the RA server to identify the game and fetch its achievement set.
-3. **Every frame**, `achievements_poll()` checks the DDRAM mirror's frame counter. When it advances, it calls `rc_client_do_frame()`, which reads emulated RAM through the mirror and evaluates all active achievement conditions.
+2. **When a game is loaded**, the binary hashes the ROM or disc image and queries the RA server to identify the game and fetch its achievement set.
+3. **Every frame**, `achievements_poll()` checks the DDRAM mirror's frame counter. When it advances, it calls `rc_client_do_frame()`, which reads emulated RAM via the mirror and evaluates all active achievement conditions.
 4. **When an achievement triggers**, an OSD popup is displayed with the title and description, and an optional sound effect (`/media/fat/achievement.wav`) is played.
 5. **Unlocks are reported** to the RA server via the async HTTP worker.
 
@@ -93,8 +121,11 @@ Currently achievements run in **softcore mode** (savestates allowed). Hardcore m
    password=YourRAPassword
    ```
 3. Copy **all files** from the release to `/media/fat` on your MiSTer SD card (the `MiSTer` binary, `retroachievements.cfg`, and the `lib/` folder if included).
-4. You will also need the **modified NES core** from [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) — see that repo for installation instructions.
-5. Reboot your MiSTer, load the NES core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
+4. You will also need one or more of the **modified cores**:
+   - **NES**: [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer)
+   - **SNES**: [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer)
+   - **PSX**: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
+5. Reboot your MiSTer, load the core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
 6. (Optional) Place an `achievement.wav` file in `/media/fat/` to hear a sound effect on unlock.
 
 ## Building from Source
@@ -117,6 +148,8 @@ The Makefile automatically detects the rcheevos library and enables it if presen
 ## Links
 
 - Original MiSTer Main binary: [MiSTer-devel/Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer)
-- Modified NES core (required): [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer)
+- Modified NES core: [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer)
+- Modified SNES core: [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer)
+- Modified PSX core: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
 - RetroAchievements: [retroachievements.org](https://retroachievements.org/)
 - rcheevos library: [RetroAchievements/rcheevos](https://github.com/RetroAchievements/rcheevos)

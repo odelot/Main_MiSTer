@@ -53,7 +53,10 @@ ifneq ($(wildcard $(RCHEEVOS_DIR)/include/rc_client.h),)
     $(RCHEEVOS_DIR)/src/rapi/rc_api_info.c \
     $(RCHEEVOS_DIR)/src/rapi/rc_api_runtime.c \
     $(RCHEEVOS_DIR)/src/rapi/rc_api_user.c \
-    $(RCHEEVOS_DIR)/src/rhash/md5.c
+    $(RCHEEVOS_DIR)/src/rhash/md5.c \
+    $(RCHEEVOS_DIR)/src/rhash/hash.c \
+    $(RCHEEVOS_DIR)/src/rhash/cdreader.c \
+    $(RCHEEVOS_DIR)/src/rhash/aes.c
   $(info rcheevos library found — building with RetroAchievements support)
 else
   RCHEEVOS_DFLAGS =

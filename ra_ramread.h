@@ -31,7 +31,7 @@
 // ARM physical = 0x30000000 + 0x0D000000 = 0x3D000000
 // This sits below the savestate area (0x3E000000).
 #define RA_DDRAM_PHYS_BASE  0x3D000000
-#define RA_DDRAM_MAP_SIZE   0x00010000  // 64KB is more than enough for any console
+#define RA_DDRAM_MAP_SIZE   0x00080000  // 512KB covers NES (10KB) and SNES (128KB WRAM + 256KB BSRAM)
 
 // Header structure at offset 0x00 (written by FPGA)
 typedef struct __attribute__((packed)) {
@@ -40,7 +40,7 @@ typedef struct __attribute__((packed)) {
 	uint8_t  flags;          // 0x05: Bit 0 = busy (transfer in progress)
 	uint16_t reserved;       // 0x06: Reserved
 	uint32_t frame_counter;  // 0x08: Increments each VBlank
-	uint32_t reserved2;      // 0x0C: Reserved
+	uint32_t reserved2;      // 0x0C: SNES: bsram_size in bytes; NES: 0
 } ra_header_t;
 
 // Region descriptor at offset 0x10 + index * 8 (written by FPGA)
@@ -59,6 +59,28 @@ typedef struct __attribute__((packed)) {
 // NES-specific region indices
 #define RA_NES_CPURAM_REGION  0  // $0000-$07FF (2KB)
 #define RA_NES_CARTRAM_REGION 1  // $6000-$7FFF (up to 8KB+)
+
+// SNES-specific layout (fixed offsets in DDRAM mirror)
+#define RA_SNES_WRAM_OFFSET   0x00100   // WRAM data starts at byte offset 0x100
+#define RA_SNES_WRAM_SIZE     0x20000   // 128KB
+#define RA_SNES_BSRAM_OFFSET  0x20100   // BSRAM data starts after WRAM
+
+// Option C: Selective address reading (SNES)
+#define RA_SNES_ADDRLIST_OFFSET  0x40000   // ARM → FPGA: address request table
+#define RA_SNES_VALCACHE_OFFSET  0x48000   // FPGA → ARM: value response table
+#define RA_SNES_MAX_ADDRS        4096      // Max tracked addresses
+
+// Address request header at ADDRLIST_OFFSET (ARM writes)
+typedef struct __attribute__((packed)) {
+	uint32_t addr_count;    // Number of addresses
+	uint32_t request_id;    // Incremented when list changes
+} ra_addr_req_hdr_t;
+
+// Value response header at VALCACHE_OFFSET (FPGA writes)
+typedef struct __attribute__((packed)) {
+	uint32_t response_id;   // Matches request_id when valid
+	uint32_t response_frame; // Frame counter for this snapshot
+} ra_val_resp_hdr_t;
 
 // Helper: map the RA mirror DDRAM region and return pointer
 // Returns NULL on failure. Caller must call ra_ramread_unmap() when done.
@@ -89,6 +111,25 @@ uint8_t ra_ramread_nes_byte(const void *map, uint16_t nes_addr);
 // Read multiple bytes from mirrored RAM. Used as rcheevos read_memory callback.
 // Returns number of bytes read.
 uint32_t ra_ramread_nes_read(const void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes);
+
+// Read SNES memory from mirrored RAM. rcheevos address map:
+//   0x000000-0x01FFFF = WRAM (128KB)
+//   0x020000+         = Save RAM (BSRAM)
+uint32_t ra_ramread_snes_read(const void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes);
+
+// Option C: Selective address reading (SNES)
+// ARM collects needed addresses from rcheevos, writes list to DDRAM.
+// FPGA reads only those addresses each VBlank. ARM reads cached values.
+void     ra_snes_addrlist_init(void);
+void     ra_snes_addrlist_begin_collect(void);
+void     ra_snes_addrlist_add(uint32_t addr);
+int      ra_snes_addrlist_end_collect(void *map);  // Returns 1 if list changed
+uint8_t  ra_snes_addrlist_read_cached(const void *map, uint32_t addr);
+int      ra_snes_addrlist_is_ready(const void *map);
+int      ra_snes_addrlist_count(void);
+const uint32_t *ra_snes_addrlist_addrs(void);  // Returns pointer to sorted address array
+uint32_t ra_snes_addrlist_response_frame(const void *map);
+void     ra_snes_addrlist_diag_dump(const void *map);
 
 // Print a full diagnostic dump of the DDRAM mirror state to stdout and optional log file.
 // Includes: header validation, frame counter, region descriptors, hex dump of first bytes.
