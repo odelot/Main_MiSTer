@@ -125,6 +125,15 @@ static uint32_t g_psx_game_frames = 0;
 static uint32_t g_psx_poll_logged = 0;
 static struct timespec g_psx_cache_time;
 
+// MegaDrive/Genesis state (Option C, same infrastructure)
+static int g_md_optionc = 0;
+static int g_md_collecting = 0;
+static int g_md_cache_ready = 0;
+static uint32_t g_md_last_resp_frame = 0;
+static uint32_t g_md_game_frames = 0;
+static uint32_t g_md_poll_logged = 0;
+static struct timespec g_md_cache_time;
+
 #ifdef HAS_RCHEEVOS
 static rc_client_t *g_client = NULL;
 #endif
@@ -144,6 +153,12 @@ static time_t g_load_time = 0;
 // Config file path
 #define RA_CFG_PATH  "/media/fat/retroachievements.cfg"
 #define RA_SFX_PATH  "/media/fat/achievement.wav"
+
+// Popup display settings (from retroachievements.cfg)
+static int g_show_challenge_show_popup = 1; // 1 = show popup on challenge SHOW event
+static int g_show_challenge_hide_popup = 1; // 1 = show popup on challenge HIDE event
+static int g_show_progress_popups      = 1; // 1 = show progress indicator popups
+static int g_show_progress_name        = 1; // 1 = include achievement name in progress popup
 
 // ---------------------------------------------------------------------------
 // Achievement Sound
@@ -166,7 +181,14 @@ static void ra_play_achievement_sound(void)
 }
 
 // ---------------------------------------------------------------------------
-// OSD Notification Queue
+// OSD Notification — two-tier system
+//
+// Tier 1 URGENT (queued): achievement unlocked, game completed.
+//   → Multiple unlocks accumulate; each is shown in order, never interrupted.
+//
+// Tier 2 INSTANT (single slot, last-wins): progress, challenge, etc.
+//   → Shows immediately, overwriting any currently displayed instant.
+//   → Silently discarded if a Tier 1 notification is on screen.
 // ---------------------------------------------------------------------------
 
 #define NOTIF_QUEUE_CAP 8
@@ -177,106 +199,88 @@ struct ra_notif {
 	int duration_ms;
 };
 
-static ra_notif s_notif_queue[NOTIF_QUEUE_CAP];
-static int s_notif_head = 0;
-static int s_notif_tail = 0;
-static int s_notif_showing = 0;
-static unsigned long s_notif_timer = 0;
+// Tier 1 — urgent queue
+static ra_notif s_urgent_queue[NOTIF_QUEUE_CAP];
+static int s_urgent_head = 0;
+static int s_urgent_tail = 0;
+static int s_urgent_showing = 0;
+static unsigned long s_urgent_timer = 0;
 
-// Dedicated progress indicator slot — overwrites instead of queuing
-static char s_progress_text[NOTIF_TEXT_MAX] = {0};
-static int  s_progress_pending = 0;
-static int  s_progress_showing = 0;
-static unsigned long s_progress_timer = 0;
-static unsigned long s_progress_rate_timer = 0; // rate-limit OSD updates
+// Tier 2 — instant slot
+static char s_instant_text[NOTIF_TEXT_MAX] = {0};
+static int  s_instant_duration_ms = 3000;
+static int  s_instant_pending = 0;
+static int  s_instant_showing = 0;
+static unsigned long s_instant_timer = 0;
 
-static void ra_notify(const char *text, int duration_ms = 3000)
-{
-	int count = s_notif_head - s_notif_tail;
-	if (count >= NOTIF_QUEUE_CAP) {
-		// Queue full — drop oldest
-		s_notif_tail++;
-		RA_LOG("OSD: Notification queue full, dropping oldest");
-	}
-	ra_notif *n = &s_notif_queue[s_notif_head % NOTIF_QUEUE_CAP];
-	snprintf(n->text, NOTIF_TEXT_MAX, "%s", text);
-	n->duration_ms = duration_ms;
-	s_notif_head++;
-}
-
-// Urgent notifications (achievement unlocked, game completed) preempt any
-// currently showing progress indicator so they appear immediately.
+// Add to urgent queue (never dropped by instant notifications)
 static void ra_notify_urgent(const char *text, int duration_ms = 4000)
 {
-	ra_notify(text, duration_ms);
-	if (s_progress_showing) {
-		s_progress_showing = 0;
-		s_notif_showing = 0;
+	int count = s_urgent_head - s_urgent_tail;
+	if (count >= NOTIF_QUEUE_CAP) {
+		s_urgent_tail++;
+		RA_LOG("OSD: Urgent queue full, dropping oldest");
 	}
+	ra_notif *n = &s_urgent_queue[s_urgent_head % NOTIF_QUEUE_CAP];
+	snprintf(n->text, NOTIF_TEXT_MAX, "%s", text);
+	n->duration_ms = duration_ms;
+	s_urgent_head++;
+}
+
+// Set instant slot — last event wins; discarded in poll if urgent is showing
+static void ra_notify_instant(const char *text, int duration_ms = 3000)
+{
+	snprintf(s_instant_text, NOTIF_TEXT_MAX, "%s", text);
+	s_instant_duration_ms = duration_ms;
+	s_instant_pending = 1;
+}
+
+// Aliases kept for call-site readability
+static void ra_notify(const char *text, int duration_ms = 3000)
+{
+	ra_notify_instant(text, duration_ms);
 }
 
 static void ra_notify_progress(const char *text)
 {
-	// Overwrite — never queue. Progress is transient.
-	snprintf(s_progress_text, NOTIF_TEXT_MAX, "%s", text);
-	s_progress_pending = 1;
+	ra_notify_instant(text, 2500);
 }
 
-// Show queued notifications via Info() popup (called from achievements_poll)
+// Drive OSD display — called every achievements_poll() tick
 static void ra_osd_poll(void)
 {
-	// If a main notification is showing, wait for it to expire
-	if (s_notif_showing && !s_progress_showing) {
-		if (CheckTimer(s_notif_timer)) {
-			s_notif_showing = 0;
-		} else {
-			return;
-		}
-	}
+	// Expire timers
+	if (s_urgent_showing && CheckTimer(s_urgent_timer))
+		s_urgent_showing = 0;
+	if (s_instant_showing && CheckTimer(s_instant_timer))
+		s_instant_showing = 0;
 
-	// If progress is showing at the bottom, check its timer and let it expire
-	// naturally — only ra_notify_urgent() can cut it off early
-	if (s_progress_showing) {
-		if (CheckTimer(s_progress_timer)) {
-			s_progress_showing = 0;
-			s_notif_showing = 0;
-		} else {
-			// Progress still running; don't show anything on top of it
-			// (progress is at the bottom, main queue is at the top —
-			//  they use different y positions so both can be "active"
-			//  from the OSD hardware perspective, but we still serialize
-			//  to avoid fighting over the OSD channel)
-			return;
-		}
-	}
-
-	// Don't show if menu is active (user is navigating)
 	if (menu_present()) return;
 
-	// Priority 1: queued notifications (achievements, challenges, etc.) — shown at top
-	if (s_notif_head != s_notif_tail) {
-		ra_notif *n = &s_notif_queue[s_notif_tail % NOTIF_QUEUE_CAP];
-		s_notif_tail++;
-
+	// Tier 1: show next urgent as soon as previous one expires
+	if (!s_urgent_showing && s_urgent_head != s_urgent_tail) {
+		ra_notif *n = &s_urgent_queue[s_urgent_tail % NOTIF_QUEUE_CAP];
+		s_urgent_tail++;
 		Info(n->text, n->duration_ms + 500, 0, 0, 1);
-		s_notif_timer = GetTimer(n->duration_ms);
-		s_notif_showing = 1;
-
-		RA_LOG("OSD: Showing notification (%dms)", n->duration_ms);
+		s_urgent_timer    = GetTimer(n->duration_ms);
+		s_urgent_showing  = 1;
+		// Urgent takes over the display — discard any pending instant
+		s_instant_pending = 0;
+		s_instant_showing = 0;
+		RA_LOG("OSD: Showing urgent notification (%dms)", n->duration_ms);
 		return;
 	}
 
-	// Priority 2: progress indicator — shown at bottom of screen (rate-limited to every 2s)
-	if (s_progress_pending) {
-		if (!s_progress_rate_timer || CheckTimer(s_progress_rate_timer)) {
-			InfoAt(s_progress_text, 2500, 200);
-			s_progress_timer = GetTimer(2000);
-			s_progress_rate_timer = GetTimer(2000);
-			s_progress_showing = 1;
-			s_notif_showing = 1;
-			s_progress_pending = 0;
-
-			RA_LOG("OSD: Showing progress");
+	// Tier 2: instant slot — show immediately; discard if urgent is on screen
+	if (s_instant_pending) {
+		s_instant_pending = 0;
+		if (!s_urgent_showing) {
+			Info(s_instant_text, s_instant_duration_ms + 500, 0, 0, 1);
+			s_instant_timer   = GetTimer(s_instant_duration_ms);
+			s_instant_showing = 1;
+			RA_LOG("OSD: Showing instant notification (%dms)", s_instant_duration_ms);
+		} else {
+			RA_LOG("OSD: Instant notification discarded (urgent showing)");
 		}
 	}
 }
@@ -402,6 +406,14 @@ static int ra_load_credentials(void)
 			snprintf(g_ra_user, sizeof(g_ra_user), "%s", val);
 		} else if (!strcasecmp(key, "password")) {
 			snprintf(g_ra_password, sizeof(g_ra_password), "%s", val);
+		} else if (!strcasecmp(key, "show_challenge_show_popup")) {
+			g_show_challenge_show_popup = atoi(val);
+		} else if (!strcasecmp(key, "show_challenge_hide_popup")) {
+			g_show_challenge_hide_popup = atoi(val);
+		} else if (!strcasecmp(key, "show_progress_popups")) {
+			g_show_progress_popups = atoi(val);
+		} else if (!strcasecmp(key, "show_progress_name")) {
+			g_show_progress_name = atoi(val);
 		}
 	}
 	fclose(f);
@@ -412,6 +424,9 @@ static int ra_load_credentials(void)
 	}
 
 	RA_LOG("Credentials loaded: user=%s password=***(%zu chars)", g_ra_user, strlen(g_ra_password));
+	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d",
+		g_show_challenge_show_popup, g_show_challenge_hide_popup,
+		g_show_progress_popups, g_show_progress_name);
 	return 1;
 }
 
@@ -640,6 +655,22 @@ static uint32_t ra_read_memory(uint32_t address, uint8_t *buffer,
 			}
 		case 7:  // RC_CONSOLE_NINTENDO (NES)
 			return ra_ramread_nes_read(g_ra_map, address, buffer, num_bytes);
+		case 1:  // RC_CONSOLE_MEGA_DRIVE (Genesis)
+			if (g_md_optionc) {
+				if (g_md_collecting) {
+					for (uint32_t i = 0; i < num_bytes; i++)
+						ra_snes_addrlist_add(address + i);
+				}
+				if (g_md_cache_ready) {
+					for (uint32_t i = 0; i < num_bytes; i++)
+						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
+					return num_bytes;
+				}
+				memset(buffer, 0, num_bytes);
+				return num_bytes;
+			}
+			memset(buffer, 0, num_bytes);
+			return num_bytes;
 		case 12: // RC_CONSOLE_PLAYSTATION (PSX)
 			if (g_psx_optionc) {
 				if (g_psx_collecting) {
@@ -759,11 +790,20 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 			RA_LOG("*** ACHIEVEMENT TRIGGERED: [%u] %s — %s ***",
 				event->achievement->id, event->achievement->title,
 				event->achievement->description);
+			const int title_max = 28;
+			const int desc_max  = 60;
+			char title_buf[32];
+			char desc_buf[64];
+			snprintf(title_buf, title_max + 1, "%s", event->achievement->title);
+			if (strlen(event->achievement->title) > (size_t)title_max)
+				strcat(title_buf, "...");
+			snprintf(desc_buf, desc_max + 1, "%s", event->achievement->description);
+			if (strlen(event->achievement->description) > (size_t)desc_max)
+				strcat(desc_buf, "...");
 			char buf[NOTIF_TEXT_MAX];
 			snprintf(buf, sizeof(buf),
 				">> ACHIEVEMENT <<\n\n%s\n%s",
-				event->achievement->title,
-				event->achievement->description);
+				title_buf, desc_buf);
 			ra_notify_urgent(buf, 4000);
 			ra_play_achievement_sound();
 		}
@@ -773,29 +813,56 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 		{
 			RA_LOG("CHALLENGE SHOW: [%u] %s",
 				event->achievement->id, event->achievement->title);
-			char buf[NOTIF_TEXT_MAX];
-			snprintf(buf, sizeof(buf),
-				"CHALLENGE ACTIVE\n\n%s",
-				event->achievement->title);
-			ra_notify(buf, 3000);
+			if (g_show_challenge_show_popup) {
+				const int title_max = 28;
+				char title_buf[32];
+				snprintf(title_buf, title_max + 1, "%s", event->achievement->title);
+				if (strlen(event->achievement->title) > (size_t)title_max)
+					strcat(title_buf, "...");
+				char buf[NOTIF_TEXT_MAX];
+				snprintf(buf, sizeof(buf), "CHALLENGE ACTIVE\n\n%s", title_buf);
+				ra_notify(buf, 3000);
+			}
 		}
 		break;
 
 	case RC_CLIENT_EVENT_ACHIEVEMENT_CHALLENGE_INDICATOR_HIDE:
-		RA_LOG("CHALLENGE HIDE: [%u] %s",
-			event->achievement->id, event->achievement->title);
+		{
+			RA_LOG("CHALLENGE HIDE: [%u] %s",
+				event->achievement->id, event->achievement->title);
+			if (g_show_challenge_hide_popup) {
+				const int title_max = 28;
+				char title_buf[32];
+				snprintf(title_buf, title_max + 1, "%s", event->achievement->title);
+				if (strlen(event->achievement->title) > (size_t)title_max)
+					strcat(title_buf, "...");
+				char buf[NOTIF_TEXT_MAX];
+				snprintf(buf, sizeof(buf), "CHALLENGE MISSED\n\n%s", title_buf);
+				ra_notify(buf, 3000);
+			}
+		}
 		break;
 
 	case RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_SHOW:
 	case RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_UPDATE:
 		{
-			RA_LOG("PROGRESS: %s", event->achievement->measured_progress);
-			char buf[NOTIF_TEXT_MAX];
-			snprintf(buf, sizeof(buf),
-				"%s\n\nProgress: %s",
-				event->achievement->title,
-				event->achievement->measured_progress);
-			ra_notify_progress(buf);
+			RA_LOG("PROGRESS: %s — %s", event->achievement->title, event->achievement->measured_progress);
+			if (g_show_progress_popups) {
+				char buf[NOTIF_TEXT_MAX];
+				if (g_show_progress_name) {
+					const int title_max = 28;
+					char title_buf[32]; // 28 chars + "..." + null
+					snprintf(title_buf, title_max + 1, "%s", event->achievement->title);
+					if (strlen(event->achievement->title) > (size_t)title_max)
+						strcat(title_buf, "...");
+					snprintf(buf, sizeof(buf), "%s\nProgress: %s",
+						title_buf, event->achievement->measured_progress);
+				} else {
+					snprintf(buf, sizeof(buf), "Progress: %s",
+						event->achievement->measured_progress);
+				}
+				ra_notify_progress(buf);
+			}
 		}
 		break;
 
@@ -958,7 +1025,7 @@ void achievements_init(void)
 {
 	ra_log_open();
 	RA_LOG("=== RetroAchievements for MiSTer ===");
-	RA_LOG("Build: OptionC v12-psx (2026-04-12)");
+	RA_LOG("Build: OptionC v13-md (2026-04-12)");
 	RA_LOG("Phase 3 — Full pipeline: HTTP + login + achievements");
 
 	const char *core = user_io_get_core_name(1);
@@ -1103,6 +1170,12 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 	g_psx_last_resp_frame = 0;
 	g_psx_game_frames = 0;
 	g_psx_poll_logged = 0;
+	g_md_optionc = 0;
+	g_md_collecting = 0;
+	g_md_cache_ready = 0;
+	g_md_last_resp_frame = 0;
+	g_md_game_frames = 0;
+	g_md_poll_logged = 0;
 	ra_snes_addrlist_init();
 
 	// Check mirror state
@@ -1168,6 +1241,10 @@ void achievements_poll(void)
 				g_psx_optionc = 1;
 				RA_LOG("PSX FPGA protocol: Option C (selective address reading)");
 			}
+			if (ra_get_console_id() == 1) {
+				g_md_optionc = 1;
+				RA_LOG("MegaDrive FPGA protocol: Option C (selective address reading)");
+			}
 		} else {
 			// Periodic debug while waiting for FPGA mirror
 			static uint32_t wait_count = 0;
@@ -1190,7 +1267,7 @@ void achievements_poll(void)
 	// Periodic diagnostics every ~5s (assuming poll is called frequently)
 	if ((poll_calls % 18000) == 1) {
 		int console = ra_get_console_id();
-		int optionc = (console == 12) ? g_psx_optionc : g_snes_optionc;
+		int optionc = (console == 12) ? g_psx_optionc : (console == 1) ? g_md_optionc : g_snes_optionc;
 		RA_LOG("DIAG: poll_calls=%u frame=%u last_frame=%u busy=%d processed=%u skipped=%u game_loaded=%d console=%d optionc=%d",
 			poll_calls, frame, g_last_frame, busy, g_frames_processed, g_frames_skipped, g_game_loaded,
 			console, optionc);
@@ -1219,6 +1296,92 @@ void achievements_poll(void)
 				g_psx_cache_ready ? "active" : "waiting",
 				ra_snes_addrlist_response_frame(g_ra_map),
 				g_psx_game_frames);
+		} else if (console == 1 && g_md_optionc) {
+			// MegaDrive Option C: show address cache status
+			RA_LOG("MD OptionC: addrs=%d cache=%s resp_frame=%u game_frames=%u",
+				ra_snes_addrlist_count(),
+				g_md_cache_ready ? "active" : "waiting",
+				ra_snes_addrlist_response_frame(g_ra_map),
+				g_md_game_frames);
+			if (g_md_cache_ready && g_ra_map) {
+				const uint8_t *vals = (const uint8_t *)g_ra_map + 0x48000 + 8;
+				int cnt = ra_snes_addrlist_count();
+				int dump_len = cnt < 45 ? cnt : 45;
+				int non_zero = 0;
+				char hex[256];
+				int pos = 0;
+				for (int i = 0; i < dump_len && pos < (int)sizeof(hex) - 4; i++) {
+					pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", vals[i]);
+					if (vals[i]) non_zero++;
+				}
+				RA_LOG("VALCACHE[0..%d]: %s (%d non-zero)", dump_len - 1, hex, non_zero);
+				// v0x04 debug layout:
+				// Word 1 (0x10): {ver(8), dispatch(8), ok(16), oob(16), 0(16)}
+				// Words 2-5 (0x18-0x30): 8 debug records at 32 bits each, 2 per word
+				//   Each rec: {bram_addr[14:0](15), cur_addr_bit0(1), bram_dout(16)}
+				// Word 6 (0x38): sweep test {0x5B00(16), sweep_dout(16), bram_dout_now(16), 0(16)}
+				const uint8_t *base = (const uint8_t *)g_ra_map;
+				const uint64_t *dbg1 = (const uint64_t *)(base + 0x10);
+				uint64_t d1 = *dbg1;
+				uint8_t  fpga_ver     = (d1 >> 56) & 0xFF;
+				uint8_t  dispatch_cnt = (d1 >> 48) & 0xFF;
+				uint16_t ok_cnt       = (d1 >> 32) & 0xFFFF;
+				uint16_t oob_cnt      = (d1 >> 16) & 0xFFFF;
+				RA_LOG("FPGA_DBG: ver=0x%02X disp=%u ok=%u oob=%u",
+					fpga_ver, dispatch_cnt, ok_cnt, oob_cnt);
+
+				// Read 8 per-address debug records (first 8 addresses)
+				// Addresses in sorted order: D003 D008 D009 D01B D023 D5C1 F601 F602
+				for (int w = 0; w < 4; w++) {
+					const uint64_t *dw = (const uint64_t *)(base + 0x18 + w * 8);
+					uint64_t word = *dw;
+					uint32_t rec_lo = word & 0xFFFFFFFF;
+					uint32_t rec_hi = (word >> 32) & 0xFFFFFFFF;
+					int idx0 = w * 2, idx1 = w * 2 + 1;
+					uint16_t baddr0 = (rec_lo >> 17) & 0x7FFF;
+					uint8_t  bit0_0 = (rec_lo >> 16) & 1;
+					uint16_t bdout0 = rec_lo & 0xFFFF;
+					uint16_t baddr1 = (rec_hi >> 17) & 0x7FFF;
+					uint8_t  bit0_1 = (rec_hi >> 16) & 1;
+					uint16_t bdout1 = rec_hi & 0xFFFF;
+					RA_LOG("  REC[%d]: waddr=0x%04X a0=%u dout=0x%04X | REC[%d]: waddr=0x%04X a0=%u dout=0x%04X",
+						idx0, baddr0, bit0_0, bdout0, idx1, baddr1, bit0_1, bdout1);
+				}
+
+				// Sweep test result: {sweep1_F601(16), sweep2_FF84(16), addr1(16), addr2(16)}
+				const uint64_t *dsweep = (const uint64_t *)(base + 0x38);
+				uint64_t sw = *dsweep;
+				uint16_t sw_val1 = (sw >> 48) & 0xFFFF;  // bram_dout at 0x5B00 (F601)
+				uint16_t sw_val2 = (sw >> 32) & 0xFFFF;  // bram_dout at 0x5F02 (FF84)
+				uint16_t sw_a1   = (sw >> 16) & 0xFFFF;   // should be 0x5B00
+				uint16_t sw_a2   = sw & 0xFFFF;            // should be 0x5F02
+				RA_LOG("SWEEP1(F601): bram=0x%04X dout=0x%04X | SWEEP2(FF84): bram=0x%04X dout=0x%04X",
+					sw_a1, sw_val1, sw_a2, sw_val2);
+
+				// Dump first 20 addresses from the sorted address list
+				const uint32_t *addrs = ra_snes_addrlist_addrs();
+				int acnt = ra_snes_addrlist_count();
+				int adump = acnt < 20 ? acnt : 20;
+				char ahex[256];
+				int apos = 0;
+				for (int i = 0; i < adump && apos < (int)sizeof(ahex) - 8; i++)
+					apos += snprintf(ahex + apos, sizeof(ahex) - apos, "%04X ", addrs[i]);
+				RA_LOG("ADDRLIST[0..%d]: %s (total=%d)", adump - 1, ahex, acnt);
+
+				// Direct lookup of key Sonic 1 / MD addresses
+				uint8_t gs   = ra_snes_addrlist_read_cached(g_ra_map, 0xF601);
+				uint8_t act  = ra_snes_addrlist_read_cached(g_ra_map, 0xFE10);
+				uint8_t zone = ra_snes_addrlist_read_cached(g_ra_map, 0xFE11);
+				uint8_t lives= ra_snes_addrlist_read_cached(g_ra_map, 0xFE13);
+				uint8_t rings_h = ra_snes_addrlist_read_cached(g_ra_map, 0xFE20);
+				uint8_t rings_l = ra_snes_addrlist_read_cached(g_ra_map, 0xFE21);
+				uint8_t tmin = ra_snes_addrlist_read_cached(g_ra_map, 0xFE22);
+				uint8_t tsec = ra_snes_addrlist_read_cached(g_ra_map, 0xFE25);
+				uint8_t demo = ra_snes_addrlist_read_cached(g_ra_map, 0xFFF0);
+				uint8_t dbgm = ra_snes_addrlist_read_cached(g_ra_map, 0xFFFA);
+				RA_LOG("KEY: F601(state)=%02X FE10(act)=%02X FE11(zone)=%02X FE13(lives)=%02X FE20-21(rings)=%02X%02X FE22(tmin)=%02X FE25(tsec)=%02X FFF0(demo)=%02X FFFA(dbg)=%02X",
+					gs, act, zone, lives, rings_h, rings_l, tmin, tsec, demo, dbgm);
+			}
 		} else {
 			// NES: region-based layout
 			const uint8_t *cpuram = ra_ramread_region_data(g_ra_map, 0);
@@ -1429,6 +1592,118 @@ void achievements_poll(void)
 		}
 		return; // PSX handled
 	}
+
+	// ================================================================
+	// MegaDrive/Genesis: Option C — selective address reading
+	// ================================================================
+	if (g_client && g_game_loaded && ra_get_console_id() == 1 && g_md_optionc) {
+		if (ra_snes_addrlist_count() == 0 && !g_md_cache_ready) {
+			// Bootstrap: run one do_frame with zeros to discover needed addresses
+			g_md_collecting = 1;
+			ra_snes_addrlist_begin_collect();
+			rc_client_do_frame(g_client);
+			g_md_collecting = 0;
+			int changed = ra_snes_addrlist_end_collect(g_ra_map);
+			if (changed) {
+				RA_LOG("MD OptionC: Bootstrap collection done, %d addrs written to DDRAM",
+					ra_snes_addrlist_count());
+			} else {
+				RA_LOG("MD OptionC: No addresses collected");
+			}
+		} else if (!g_md_cache_ready) {
+			// Wait for FPGA to respond with cached values
+			if (ra_snes_addrlist_is_ready(g_ra_map)) {
+				g_md_cache_ready = 1;
+				g_md_last_resp_frame = 0;
+				g_md_game_frames = 0;
+				g_md_poll_logged = 0;
+				clock_gettime(CLOCK_MONOTONIC, &g_md_cache_time);
+				RA_LOG("MD OptionC: Cache active! FPGA response matched request.");
+				// Dump address list once on activation
+				const uint32_t *a0 = ra_snes_addrlist_addrs();
+				int ac = ra_snes_addrlist_count();
+				int ad = ac < 20 ? ac : 20;
+				char ah[256]; int ap = 0;
+				for (int i = 0; i < ad && ap < (int)sizeof(ah) - 8; i++)
+					ap += snprintf(ah + ap, sizeof(ah) - ap, "%04X ", a0[i]);
+				RA_LOG("ADDRLIST[0..%d]: %s (total=%d)", ad - 1, ah, ac);
+			}
+		} else {
+			// Normal frame processing from cache
+			uint32_t resp_frame = ra_snes_addrlist_response_frame(g_ra_map);
+			if (resp_frame > g_md_last_resp_frame) {
+				g_md_last_resp_frame = resp_frame;
+				g_last_frame = resp_frame;
+				g_frames_processed++;
+				g_md_game_frames++;
+
+				if (g_md_game_frames <= 5) {
+					const uint8_t *ev = (const uint8_t *)g_ra_map + 0x48000 + 8;
+					int ec = ra_snes_addrlist_count();
+					int ed = ec < 45 ? ec : 45;
+					int enz = 0;
+					char eh[256]; int ep = 0;
+					for (int i = 0; i < ed && ep < (int)sizeof(eh) - 4; i++) {
+						ep += snprintf(eh + ep, sizeof(eh) - ep, "%02X ", ev[i]);
+						if (ev[i]) enz++;
+					}
+					RA_LOG("MD early[%u]: %s (%d nz)", g_md_game_frames, eh, enz);
+					uint8_t egs = ra_snes_addrlist_read_cached(g_ra_map, 0xF601);
+					uint8_t eact = ra_snes_addrlist_read_cached(g_ra_map, 0xFE10);
+					uint8_t ezone = ra_snes_addrlist_read_cached(g_ra_map, 0xFE11);
+					uint8_t elives = ra_snes_addrlist_read_cached(g_ra_map, 0xFE13);
+					uint8_t edemo = ra_snes_addrlist_read_cached(g_ra_map, 0xFFF0);
+					RA_LOG("MD early KEY: state=%02X act=%02X zone=%02X lives=%02X demo=%02X",
+						egs, eact, ezone, elives, edemo);
+				}
+
+				// Re-collect every ~5 min to catch address changes
+				int re_collect = (g_md_game_frames % 18000 == 0) && (g_md_game_frames > 0);
+				if (re_collect) {
+					g_md_collecting = 1;
+					ra_snes_addrlist_begin_collect();
+				}
+
+				rc_client_do_frame(g_client);
+
+				if (re_collect) {
+					g_md_collecting = 0;
+					if (ra_snes_addrlist_end_collect(g_ra_map)) {
+						RA_LOG("MD OptionC: Address list refreshed, %d addrs",
+							ra_snes_addrlist_count());
+					}
+				}
+			}
+		}
+
+		uint32_t milestone = g_md_game_frames / 300;
+		if (milestone > 0 && milestone != g_md_poll_logged) {
+			g_md_poll_logged = milestone;
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			double elapsed = (now.tv_sec - g_md_cache_time.tv_sec)
+				+ (now.tv_nsec - g_md_cache_time.tv_nsec) / 1e9;
+			double ms_per_cycle = (g_md_game_frames > 0) ?
+				(elapsed * 1000.0 / g_md_game_frames) : 0.0;
+			RA_LOG("POLL(MD): resp_frame=%u game_frames=%u elapsed=%.1fs ms/cycle=%.1f addrs=%d",
+				g_md_last_resp_frame, g_md_game_frames, elapsed, ms_per_cycle,
+				ra_snes_addrlist_count());
+			// Key address snapshot at each milestone
+			if (g_md_cache_ready && g_ra_map) {
+				uint8_t gs   = ra_snes_addrlist_read_cached(g_ra_map, 0xF601);
+				uint8_t act  = ra_snes_addrlist_read_cached(g_ra_map, 0xFE10);
+				uint8_t zone = ra_snes_addrlist_read_cached(g_ra_map, 0xFE11);
+				uint8_t lives= ra_snes_addrlist_read_cached(g_ra_map, 0xFE13);
+				uint8_t demo = ra_snes_addrlist_read_cached(g_ra_map, 0xFFF0);
+				uint8_t ffe0 = ra_snes_addrlist_read_cached(g_ra_map, 0xFFE0);
+				uint8_t ffe3 = ra_snes_addrlist_read_cached(g_ra_map, 0xFFE3);
+				uint8_t fff9 = ra_snes_addrlist_read_cached(g_ra_map, 0xFFF9);
+				RA_LOG("KEY: state=%02X act=%02X zone=%02X lives=%02X demo=%02X FFE0=%02X FFE3=%02X FFF9=%02X",
+					gs, act, zone, lives, demo, ffe0, ffe3, fff9);
+			}
+		}
+		return; // MegaDrive handled
+	}
 #endif
 
 	// ================================================================
@@ -1531,8 +1806,10 @@ void achievements_unload_game(void)
 	ra_snes_addrlist_init();
 
 	// Clear pending notifications
-	s_notif_head = s_notif_tail = 0;
-	s_notif_showing = 0;
+	s_urgent_head = s_urgent_tail = 0;
+	s_urgent_showing  = 0;
+	s_instant_pending = 0;
+	s_instant_showing = 0;
 }
 
 void achievements_deinit(void)
