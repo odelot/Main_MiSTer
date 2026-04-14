@@ -12,6 +12,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | SNES | 3 | [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer) |
 | Genesis / Mega Drive | 1 | [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer) |
 | Master System / Game Gear | 11 | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
+| Gameboy / Gameboy Color | 4 | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
 | N64 | 2 | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
 | PSX | 12 | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
 
@@ -58,7 +59,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│  FPGA Core (NES / SNES / Genesis / SMS / N64 / PSX)    │
+│  FPGA Core (NES / SNES / Genesis / SMS / GB / N64 / PSX) │
 │  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
 │  every VBlank (~60 Hz)                                │
 └──────────────────────┬────────────────────────────────┘
@@ -132,6 +133,15 @@ Uses the same selective address protocol. The FPGA reads from dual-ported System
 
 The SMS core converts its existing single-port RAMs to dual-port (`dpram`) so the RA mirror can read on Port B without disturbing the CPU on Port A. A custom DDRAM arbiter (`ddram_arb_sms.sv`) shares bus access between the framebuffer and the RA mirror.
 
+#### Gameboy / Gameboy Color — Selective Address (`ra_ram_mirror_gb.sv`)
+Uses the selective address protocol. The FPGA reads from dual-ported WRAM and ZPRAM (HRAM), plus cart RAM via a dedicated SDRAM channel:
+- **WRAM** ($C000–$DFFF + GBC banks 2–7 via $10000–$15FFF) — up to 32 KB
+- **Cart RAM** ($A000–$BFFF + banks 1–15 via $16000–$33FFF) — up to 128 KB via SDRAM ch2
+- **HRAM / ZPRAM** ($FF80–$FFFE) — 127 bytes
+- **Echo RAM** ($E000–$FDFF) — automatically translated to $C000–$DDFF
+
+The Gameboy core multiplexes Port B of existing dual-port WRAM and ZPRAM BRAMs between savestate access and RA reads (RA takes priority when `ra_wram_req` / `ra_zpram_req` is asserted). Cart RAM is accessed read-only through SDRAM channel 2 with busy handshaking. A 2-cycle BRAM read path is used (address latch → output valid). The DDRAM arbiter in the core's `ddram.sv` module provides a dedicated channel for RA read/write operations alongside the savestate channel.
+
 #### N64 — Selective Address (`ra_ram_mirror_n64.sv`)
 Uses the same selective address protocol but with N64-specific adaptations. The FPGA reads requested byte addresses directly from RDRAM stored in DDR3:
 - **RDRAM** ($000000–$7FFFFF) — 4 to 8 MB
@@ -154,6 +164,7 @@ Same request/response protocol. The FPGA reads requested addresses from SDRAM vi
 | NES | MD5 of ROM data, skipping 16-byte iNES header and optional 512-byte trainer |
 | SNES | MD5 of ROM data, skipping optional 512-byte SMC/SWC copier header (detected when `file_size % 1024 == 512`) |
 | Genesis | MD5 of the raw ROM file (no header skipping needed) |
+| Gameboy / GBC | MD5 of the raw ROM file (no header skipping needed) |
 | N64 | `rc_hash_generate_from_file()` from rcheevos — handles `.z64`, `.n64`, and `.v64` byte orders natively |
 | PSX | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, and `.iso` disc images natively |
 
@@ -181,6 +192,7 @@ Currently achievements run in **softcore mode** (savestates allowed). Hardcore m
    - **SNES**: [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer)
    - **Genesis / Mega Drive**: [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer)
    - **Master System / Game Gear**: [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer)
+   - **Gameboy / Gameboy Color**: [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer)
    - **N64**: [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer)
    - **PSX**: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
 5. Reboot your MiSTer, load the core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
@@ -210,6 +222,7 @@ The Makefile automatically detects the rcheevos library and enables it if presen
 - Modified SNES core: [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer)
 - Modified Genesis core: [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer)
 - Modified SMS core: [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer)
+- Modified Gameboy core: [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer)
 - Modified N64 core: [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer)
 - Modified PSX core: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
 - RetroAchievements: [retroachievements.org](https://retroachievements.org/)
