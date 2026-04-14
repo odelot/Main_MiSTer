@@ -195,6 +195,15 @@ static uint32_t g_sms_game_frames = 0;
 static uint32_t g_sms_poll_logged = 0;
 static struct timespec g_sms_cache_time;
 
+// GBA state (Option C, same infrastructure)
+static int g_gba_optionc = 0;
+static int g_gba_collecting = 0;
+static int g_gba_cache_ready = 0;
+static uint32_t g_gba_last_resp_frame = 0;
+static uint32_t g_gba_game_frames = 0;
+static uint32_t g_gba_poll_logged = 0;
+static struct timespec g_gba_cache_time;
+
 #ifdef HAS_RCHEEVOS
 static rc_client_t *g_client = NULL;
 #endif
@@ -757,14 +766,17 @@ static uint32_t ra_read_memory(uint32_t address, uint8_t *buffer,
 			memset(buffer, 0, num_bytes);
 			return num_bytes;
 		case 2: // RC_CONSOLE_NINTENDO_64 (N64)
+			// N64 rcheevos addresses are big-endian; RDRAM in DDR3 is
+			// little-endian within 32-bit words.  XOR 3 on the low 2 bits
+			// converts between the two byte orders.
 			if (g_n64_optionc) {
 				if (g_n64_collecting) {
 					for (uint32_t i = 0; i < num_bytes; i++)
-						ra_snes_addrlist_add(address + i);
+						ra_snes_addrlist_add(((address + i) ^ 3));
 				}
 				if (g_n64_cache_ready) {
 					for (uint32_t i = 0; i < num_bytes; i++)
-						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
+						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, ((address + i) ^ 3));
 					return num_bytes;
 				}
 				memset(buffer, 0, num_bytes);
@@ -780,6 +792,22 @@ static uint32_t ra_read_memory(uint32_t address, uint8_t *buffer,
 						ra_snes_addrlist_add(address + i);
 				}
 				if (g_sms_cache_ready) {
+					for (uint32_t i = 0; i < num_bytes; i++)
+						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
+					return num_bytes;
+				}
+				memset(buffer, 0, num_bytes);
+				return num_bytes;
+			}
+			memset(buffer, 0, num_bytes);
+			return num_bytes;
+		case 5:  // RC_CONSOLE_GAMEBOY_ADVANCE
+			if (g_gba_optionc) {
+				if (g_gba_collecting) {
+					for (uint32_t i = 0; i < num_bytes; i++)
+						ra_snes_addrlist_add(address + i);
+				}
+				if (g_gba_cache_ready) {
 					for (uint32_t i = 0; i < num_bytes; i++)
 						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
 					return num_bytes;
@@ -1153,7 +1181,7 @@ void achievements_init(void)
 	signal(SIGFPE,  ra_crash_handler);
 
 	RA_LOG("=== RetroAchievements for MiSTer ===");
-	RA_LOG("Build: OptionC v19-n64xor3fix (2026-04-13)");
+	RA_LOG("Build: OptionC v21-n64xor3arm (2026-04-14)");
 	RA_LOG("Phase 3 — Full pipeline: HTTP + login + achievements");
 
 	const char *core = user_io_get_core_name(1);
@@ -1339,6 +1367,12 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 	g_gb_last_resp_frame = 0;
 	g_gb_game_frames = 0;
 	g_gb_poll_logged = 0;
+	g_gba_optionc = 0;
+	g_gba_collecting = 0;
+	g_gba_cache_ready = 0;
+	g_gba_last_resp_frame = 0;
+	g_gba_game_frames = 0;
+	g_gba_poll_logged = 0;
 	ra_snes_addrlist_init();
 
 	// Check mirror state
@@ -1461,6 +1495,10 @@ void achievements_poll(void)
 				g_gb_optionc = 1;
 				RA_LOG("Gameboy FPGA protocol: Option C (selective address reading)");
 			}
+			if (ra_get_console_id() == 5) {
+				g_gba_optionc = 1;
+				RA_LOG("GBA FPGA protocol: Option C (selective address reading)");
+			}
 			if (ra_get_console_id() == 11) {
 				g_sms_optionc = 1;
 				RA_LOG("SMS FPGA protocol: Option C (selective address reading)");
@@ -1487,7 +1525,7 @@ void achievements_poll(void)
 	// Periodic diagnostics every ~5s (assuming poll is called frequently)
 	if ((poll_calls % 18000) == 1) {
 		int console = ra_get_console_id();
-		int optionc = (console == 11) ? g_sms_optionc : (console == 2) ? g_n64_optionc : (console == 12) ? g_psx_optionc : (console == 1) ? g_md_optionc : g_snes_optionc;
+		int optionc = (console == 4) ? g_gb_optionc : (console == 5) ? g_gba_optionc : (console == 11) ? g_sms_optionc : (console == 2) ? g_n64_optionc : (console == 12) ? g_psx_optionc : (console == 1) ? g_md_optionc : g_snes_optionc;
 		RA_LOG("DIAG: poll_calls=%u frame=%u last_frame=%u busy=%d processed=%u skipped=%u game_loaded=%d console=%d optionc=%d",
 			poll_calls, frame, g_last_frame, busy, g_frames_processed, g_frames_skipped, g_game_loaded,
 			console, optionc);
@@ -1550,6 +1588,9 @@ void achievements_poll(void)
 				RA_LOG("N64 FPGA: magic=%08X flags=%02X frame=%u ver=0x%02X state=%u vbl_hb=%u ok=%u disp=%u timeout=%u/%u warmup=%u first=0x%04X",
 					magic, flags, frame, fpga_ver, state_snap, vbl_hb,
 					ok_cnt, disp_cnt, timeout_cnt, max_timeout, warmup_left, first_addr);
+				if (fpga_ver != 0x03) {
+					RA_LOG("N64 FPGA: *** VERSION MISMATCH! Expected 0x03, got 0x%02X — old bitstream? ***", fpga_ver);
+				}
 				// VALCACHE response header
 				const uint32_t *resp32 = (const uint32_t *)(base + 0x48000);
 				RA_LOG("N64 VALCACHE: resp_id=%u resp_frame=%u (expect req_id=%u)",
@@ -1641,6 +1682,59 @@ void achievements_poll(void)
 				RA_LOG("KEY: F601(state)=%02X FE10(act)=%02X FE11(zone)=%02X FE13(lives)=%02X FE20-21(rings)=%02X%02X FE22(tmin)=%02X FE25(tsec)=%02X FFF0(demo)=%02X FFFA(dbg)=%02X",
 					gs, act, zone, lives, rings_h, rings_l, tmin, tsec, demo, dbgm);
 			}
+		} else if (console == 4 && g_gb_optionc) {
+			// GB Option C: show address cache status and value dump
+			RA_LOG("GB OptionC: addrs=%d cache=%s resp_frame=%u game_frames=%u",
+				ra_snes_addrlist_count(),
+				g_gb_cache_ready ? "active" : "waiting",
+				ra_snes_addrlist_response_frame(g_ra_map),
+				g_gb_game_frames);
+			if (g_gb_cache_ready && g_ra_map) {
+				// Dump all cached values
+				const uint8_t *vals = (const uint8_t *)g_ra_map + 0x48000 + 8;
+				int cnt = ra_snes_addrlist_count();
+				int dump_len = cnt < 32 ? cnt : 32;
+				int non_zero = 0;
+				char hex[256];
+				int pos = 0;
+				for (int i = 0; i < dump_len && pos < (int)sizeof(hex) - 4; i++) {
+					pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", vals[i]);
+					if (vals[i]) non_zero++;
+				}
+				RA_LOG("VALCACHE[0..%d]: %s (%d non-zero)", dump_len - 1, hex, non_zero);
+
+				// Dump sorted address list
+				const uint32_t *addrs = ra_snes_addrlist_addrs();
+				char ahex[256];
+				int apos = 0;
+				for (int i = 0; i < dump_len && apos < (int)sizeof(ahex) - 8; i++)
+					apos += snprintf(ahex + apos, sizeof(ahex) - apos, "%04X ", addrs[i]);
+				RA_LOG("ADDRLIST[0..%d]: %s (total=%d)", dump_len - 1, ahex, cnt);
+
+				// Key SML addresses from code notes
+				uint8_t gstate = ra_snes_addrlist_read_cached(g_ra_map, 0xFFB3);
+				uint8_t gmode  = ra_snes_addrlist_read_cached(g_ra_map, 0xFFD8);
+				uint8_t screen = ra_snes_addrlist_read_cached(g_ra_map, 0xFFF4);
+				uint8_t conts  = ra_snes_addrlist_read_cached(g_ra_map, 0xC0A6);
+				uint8_t event  = ra_snes_addrlist_read_cached(g_ra_map, 0xDFE1);
+				RA_LOG("SML KEY: FFB3(state)=%02X FFD8(mode)=%02X FFF4(screen)=%02X C0A6(conts)=%02X DFE1(event)=%02X",
+					gstate, gmode, screen, conts, event);
+
+				// FPGA debug words
+				const uint8_t *base = (const uint8_t *)g_ra_map;
+				const uint64_t *dbg1 = (const uint64_t *)(base + 0x10);
+				uint64_t d1 = *dbg1;
+				uint8_t  fpga_ver     = (d1 >> 56) & 0xFF;
+				uint16_t timeout_cnt  = (d1 >> 16) & 0xFFFF;
+				uint16_t ok_cnt       = d1 & 0xFFFF;
+				const uint64_t *dbg2 = (const uint64_t *)(base + 0x18);
+				uint64_t d2 = *dbg2;
+				uint16_t wram_cnt   = (d2 >> 32) & 0xFFFF;
+				uint16_t cram_cnt   = (d2 >> 16) & 0xFFFF;
+				uint16_t hram_cnt   = d2 & 0xFFFF;
+				RA_LOG("GB FPGA: ver=0x%02X ok=%u timeout=%u wram=%u cram=%u hram=%u",
+					fpga_ver, ok_cnt, timeout_cnt, wram_cnt, cram_cnt, hram_cnt);
+			}
 		} else if (console == 11 && g_sms_optionc) {
 			// SMS/GG Option C: show address cache status
 			RA_LOG("SMS OptionC: addrs=%d cache=%s resp_frame=%u game_frames=%u",
@@ -1661,6 +1755,13 @@ void achievements_poll(void)
 				}
 				RA_LOG("VALCACHE[0..%d]: %s (%d non-zero)", dump_len - 1, hex, non_zero);
 			}
+		} else if (console == 5 && g_gba_optionc) {
+			// GBA Option C: show address cache status
+			RA_LOG("GBA OptionC: addrs=%d cache=%s resp_frame=%u game_frames=%u",
+				ra_snes_addrlist_count(),
+				g_gba_cache_ready ? "active" : "waiting",
+				ra_snes_addrlist_response_frame(g_ra_map),
+				g_gba_game_frames);
 		} else {
 			// NES: region-based layout
 			const uint8_t *cpuram = ra_ramread_region_data(g_ra_map, 0);
@@ -1939,9 +2040,9 @@ void achievements_poll(void)
 						g_n64_game_frames, resp_frame);
 				}
 
-				// Value diagnostic at frame 30: compare FPGA cached values
+				// Value diagnostic at frame 30 and 300: compare FPGA cached values
 				// with direct ARM reads of RDRAM to verify byte ordering.
-				if (g_n64_game_frames == 30) {
+				if (g_n64_game_frames == 30 || g_n64_game_frames == 300) {
 					void *rdram_direct = shmem_map(0x30000000, 0x800000);
 					if (rdram_direct) {
 						const uint8_t *rdram = (const uint8_t *)rdram_direct;
@@ -1951,15 +2052,49 @@ void achievements_poll(void)
 						int show = addr_count < 30 ? addr_count : 30;
 						RA_LOG("=== N64 RDRAM Value Diagnostic (frame %u, %d addrs) ===",
 							g_n64_game_frames, addr_count);
+						int match_direct = 0, match_xor3 = 0, match_none = 0;
 						for (int i = 0; i < show; i++) {
 							uint32_t a = addrs[i];
 							uint8_t cached = vals[i];
 							uint8_t direct = (a < 0x800000) ? rdram[a] : 0;
 							uint8_t xor3   = (a < 0x800000) ? rdram[a ^ 3] : 0;
-							const char *tag = (cached == xor3) ? "XOR3" :
-							                  (cached == direct) ? "DIRECT" : "DIFF";
+							const char *tag;
+							if (cached == direct && cached == xor3) tag = "BOTH";
+							else if (cached == direct) { tag = "DIRECT"; match_direct++; }
+							else if (cached == xor3) { tag = "XOR3"; match_xor3++; }
+							else { tag = "DIFF"; match_none++; }
 							RA_LOG("  [%3d] addr=0x%06X cached=0x%02X direct=0x%02X xor3=0x%02X %s",
 								i, a, cached, direct, xor3, tag);
+						}
+						RA_LOG("  SUMMARY: direct=%d xor3=%d diff=%d (of %d shown)",
+							match_direct, match_xor3, match_none, show);
+
+						// SM64-specific known addresses (from code notes)
+						const struct { uint32_t addr; const char *name; } sm64[] = {
+							{0x0033b24a, "MapID"},
+							{0x0033b21d, "HP"},
+							{0x0033b21e, "Lives"},
+							{0x0033b21a, "Coins"},
+							{0x0033b218, "Stars"},
+							{0x0033b17c, "Animation"},
+							{0x0032ddfa, "MapID2"},
+							{0x0032ddf6, "CurFile"},
+						};
+						RA_LOG("  --- SM64 Known Addresses ---");
+						for (int j = 0; j < 8; j++) {
+							uint32_t a = sm64[j].addr;
+							if (a < 0x800000) {
+								uint8_t d = rdram[a];
+								uint8_t x = rdram[a ^ 3];
+								// Check if this address is in the monitored list
+								uint8_t c = 0;
+								int found = 0;
+								for (int k = 0; k < addr_count; k++) {
+									if (addrs[k] == a) { c = vals[k]; found = 1; break; }
+								}
+								RA_LOG("  SM64 %s(0x%06X): direct=0x%02X xor3=0x%02X cached=%s0x%02X",
+									sm64[j].name, a, d, x, found ? "" : "N/A:", c);
+							}
 						}
 						shmem_unmap(rdram_direct, 0x800000);
 					} else {
@@ -2163,6 +2298,59 @@ void achievements_poll(void)
 
 				rc_client_do_frame(g_client);
 
+				// Value-change watchers: log every transition of key addresses
+				{
+					static uint8_t prev_d190 = 0, prev_ff99 = 0, prev_fffa = 0;
+					static uint8_t prev_ffb3 = 0, prev_ffb4 = 0, prev_ffda = 0;
+					static uint16_t prev_score = 0;
+					static int watch_init = 0;
+
+					uint8_t cur_d190 = ra_snes_addrlist_read_cached(g_ra_map, 0xD190);
+					uint8_t cur_ff99 = ra_snes_addrlist_read_cached(g_ra_map, 0xFF99);
+					uint8_t cur_fffa = ra_snes_addrlist_read_cached(g_ra_map, 0xFFFA);
+					uint8_t cur_ffb3 = ra_snes_addrlist_read_cached(g_ra_map, 0xFFB3);
+					uint8_t cur_ffb4 = ra_snes_addrlist_read_cached(g_ra_map, 0xFFB4);
+					uint8_t cur_ffda = ra_snes_addrlist_read_cached(g_ra_map, 0xFFDA);
+					uint16_t cur_score = ra_snes_addrlist_read_cached(g_ra_map, 0xC0A0)
+					                   | (ra_snes_addrlist_read_cached(g_ra_map, 0xC0A1) << 8);
+
+					if (!watch_init) {
+						watch_init = 1;
+						prev_d190 = cur_d190; prev_ff99 = cur_ff99;
+						prev_fffa = cur_fffa; prev_ffb3 = cur_ffb3;
+						prev_ffb4 = cur_ffb4; prev_ffda = cur_ffda;
+						prev_score = cur_score;
+					} else {
+						if (cur_d190 != prev_d190)
+							RA_LOG("WATCH: D190 %02X->%02X gf=%u (FF99=%02X score=%04X D192=%02X D193=%02X)",
+								prev_d190, cur_d190, g_gb_game_frames, cur_ff99, cur_score,
+								ra_snes_addrlist_read_cached(g_ra_map, 0xD192),
+								ra_snes_addrlist_read_cached(g_ra_map, 0xD193));
+						if (cur_ff99 != prev_ff99)
+							RA_LOG("WATCH: FF99 %02X->%02X gf=%u (D190=%02X)",
+								prev_ff99, cur_ff99, g_gb_game_frames, cur_d190);
+						if (cur_fffa != prev_fffa)
+							RA_LOG("WATCH: FFFA %02X->%02X gf=%u (coin count)",
+								prev_fffa, cur_fffa, g_gb_game_frames);
+						if (cur_ffb3 != prev_ffb3)
+							RA_LOG("WATCH: FFB3 %02X->%02X gf=%u",
+								prev_ffb3, cur_ffb3, g_gb_game_frames);
+						if (cur_ffb4 != prev_ffb4)
+							RA_LOG("WATCH: FFB4 %02X->%02X gf=%u",
+								prev_ffb4, cur_ffb4, g_gb_game_frames);
+						if (cur_ffda != prev_ffda)
+							RA_LOG("WATCH: FFDA %02X->%02X gf=%u",
+								prev_ffda, cur_ffda, g_gb_game_frames);
+						if (cur_score != prev_score)
+							RA_LOG("WATCH: score %04X->%04X gf=%u (D190=%02X FF99=%02X)",
+								prev_score, cur_score, g_gb_game_frames, cur_d190, cur_ff99);
+						prev_d190 = cur_d190; prev_ff99 = cur_ff99;
+						prev_fffa = cur_fffa; prev_ffb3 = cur_ffb3;
+						prev_ffb4 = cur_ffb4; prev_ffda = cur_ffda;
+						prev_score = cur_score;
+					}
+				}
+
 				if (re_collect) {
 					g_gb_collecting = 0;
 					if (ra_snes_addrlist_end_collect(g_ra_map)) {
@@ -2266,6 +2454,77 @@ void achievements_poll(void)
 				ra_snes_addrlist_count());
 		}
 		return; // SMS handled
+	}
+
+	// ================================================================
+	// GBA: Option C — selective address reading
+	// ================================================================
+	if (g_client && g_game_loaded && ra_get_console_id() == 5 && g_gba_optionc) {
+		if (ra_snes_addrlist_count() == 0 && !g_gba_cache_ready) {
+			// Bootstrap: run one do_frame with zeros to discover needed addresses
+			g_gba_collecting = 1;
+			ra_snes_addrlist_begin_collect();
+			rc_client_do_frame(g_client);
+			g_gba_collecting = 0;
+			int changed = ra_snes_addrlist_end_collect(g_ra_map);
+			if (changed) {
+				RA_LOG("GBA OptionC: Bootstrap collection done, %d addrs written to DDRAM",
+					ra_snes_addrlist_count());
+			} else {
+				RA_LOG("GBA OptionC: No addresses collected — achievements may have no memory refs");
+			}
+		} else if (!g_gba_cache_ready) {
+			// Wait for FPGA to respond with cached values
+			if (ra_snes_addrlist_is_ready(g_ra_map)) {
+				g_gba_cache_ready = 1;
+				g_gba_last_resp_frame = 0;
+				g_gba_game_frames = 0;
+				g_gba_poll_logged = 0;
+				clock_gettime(CLOCK_MONOTONIC, &g_gba_cache_time);
+				RA_LOG("GBA OptionC: Cache active! FPGA response matched request.");
+			}
+		} else {
+			// Normal frame processing from cache
+			uint32_t resp_frame = ra_snes_addrlist_response_frame(g_ra_map);
+			if (resp_frame > g_gba_last_resp_frame) {
+				g_gba_last_resp_frame = resp_frame;
+				g_last_frame = resp_frame;
+				g_frames_processed++;
+				g_gba_game_frames++;
+
+				// Re-collect every ~5 min to catch address changes
+				int re_collect = (g_gba_game_frames % 18000 == 0) && (g_gba_game_frames > 0);
+				if (re_collect) {
+					g_gba_collecting = 1;
+					ra_snes_addrlist_begin_collect();
+				}
+
+				rc_client_do_frame(g_client);
+
+				if (re_collect) {
+					g_gba_collecting = 0;
+					if (ra_snes_addrlist_end_collect(g_ra_map)) {
+						RA_LOG("GBA OptionC: Address list refreshed, %d addrs",
+							ra_snes_addrlist_count());
+					}
+				}
+			}
+		}
+
+		uint32_t milestone = g_gba_game_frames / 300;
+		if (milestone > 0 && milestone != g_gba_poll_logged) {
+			g_gba_poll_logged = milestone;
+			struct timespec now;
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			double elapsed = (now.tv_sec - g_gba_cache_time.tv_sec)
+				+ (now.tv_nsec - g_gba_cache_time.tv_nsec) / 1e9;
+			double ms_per_cycle = (g_gba_game_frames > 0) ?
+				(elapsed * 1000.0 / g_gba_game_frames) : 0.0;
+			RA_LOG("POLL(GBA): resp_frame=%u game_frames=%u elapsed=%.1fs ms/cycle=%.1f addrs=%d",
+				g_gba_last_resp_frame, g_gba_game_frames, elapsed, ms_per_cycle,
+				ra_snes_addrlist_count());
+		}
+		return; // GBA handled
 	}
 #endif
 
@@ -2378,6 +2637,12 @@ void achievements_unload_game(void)
 	g_gb_last_resp_frame = 0;
 	g_gb_game_frames = 0;
 	g_gb_poll_logged = 0;
+	g_gba_optionc = 0;
+	g_gba_collecting = 0;
+	g_gba_cache_ready = 0;
+	g_gba_last_resp_frame = 0;
+	g_gba_game_frames = 0;
+	g_gba_poll_logged = 0;
 	ra_snes_addrlist_init();
 
 	// Clear pending notifications

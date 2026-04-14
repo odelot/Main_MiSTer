@@ -12,6 +12,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | SNES | 3 | [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer) |
 | Genesis / Mega Drive | 1 | [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer) |
 | Master System / Game Gear | 11 | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
+| N64 | 2 | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
 | PSX | 12 | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
 
 ## How to Test
@@ -57,7 +58,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│  FPGA Core (NES / SNES / Genesis / SMS / PSX)         │
+│  FPGA Core (NES / SNES / Genesis / SMS / N64 / PSX)    │
 │  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
 │  every VBlank (~60 Hz)                                │
 └──────────────────────┬────────────────────────────────┘
@@ -131,6 +132,17 @@ Uses the same selective address protocol. The FPGA reads from dual-ported System
 
 The SMS core converts its existing single-port RAMs to dual-port (`dpram`) so the RA mirror can read on Port B without disturbing the CPU on Port A. A custom DDRAM arbiter (`ddram_arb_sms.sv`) shares bus access between the framebuffer and the RA mirror.
 
+#### N64 — Selective Address (`ra_ram_mirror_n64.sv`)
+Uses the same selective address protocol but with N64-specific adaptations. The FPGA reads requested byte addresses directly from RDRAM stored in DDR3:
+- **RDRAM** ($000000–$7FFFFF) — 4 to 8 MB
+
+Key differences from other cores:
+- **Separate DDRAM base address** — N64 savestates occupy 0x3C000000–0x3FFFFFFF, colliding with the default RA mirror base. The N64 mirror is relocated to ARM physical 0x38000000.
+- **DDR3 bus arbitration** — A dedicated arbiter (`ddram_arb_n64.sv`) shares the DDR3 bus between the N64 core's 8 DDR3Mux clients (CPU, RSP, RDP, VI, etc.) and the RA mirror. A starvation counter (512-cycle limit, ~4 µs) ensures the RA mirror eventually gets bus access, and a burst mode optimization chains consecutive RA operations without re-entering the starvation wait.
+- **Clock domain crossing** — The N64 core's DDR3 controller runs at 125 MHz (`clk_2x`) while the RA mirror runs at ~62.5 MHz (`clk_1x`). Two-stage flip-flop synchronizers handle CDC for the toggle req/ack signals.
+- **Direct byte mapping** — RDRAM byte N maps directly to DDRAM byte N within each 64-bit word (the CPU's byteswap32 + memorymux half-swap already places bytes correctly). No additional XOR or byte reordering is needed on the FPGA side.
+- **8-VBlank warmup** — The mirror waits ~133 ms after reset before starting, to ensure the VI module (which generates VBlank) has stabilized.
+
 #### PSX — Selective Address (`ra_ram_mirror_psx.sv`)
 Same request/response protocol. The FPGA reads requested addresses from SDRAM via a dedicated channel (CH4):
 - **Main RAM** ($000000–$1FFFFF) — 2 MB
@@ -142,6 +154,7 @@ Same request/response protocol. The FPGA reads requested addresses from SDRAM vi
 | NES | MD5 of ROM data, skipping 16-byte iNES header and optional 512-byte trainer |
 | SNES | MD5 of ROM data, skipping optional 512-byte SMC/SWC copier header (detected when `file_size % 1024 == 512`) |
 | Genesis | MD5 of the raw ROM file (no header skipping needed) |
+| N64 | `rc_hash_generate_from_file()` from rcheevos — handles `.z64`, `.n64`, and `.v64` byte orders natively |
 | PSX | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, and `.iso` disc images natively |
 
 ### How It Works
@@ -167,6 +180,8 @@ Currently achievements run in **softcore mode** (savestates allowed). Hardcore m
    - **NES**: [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer)
    - **SNES**: [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer)
    - **Genesis / Mega Drive**: [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer)
+   - **Master System / Game Gear**: [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer)
+   - **N64**: [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer)
    - **PSX**: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
 5. Reboot your MiSTer, load the core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
 6. (Optional) Place an `achievement.wav` file in `/media/fat/` to hear a sound effect on unlock.
@@ -194,6 +209,8 @@ The Makefile automatically detects the rcheevos library and enables it if presen
 - Modified NES core: [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer)
 - Modified SNES core: [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer)
 - Modified Genesis core: [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer)
+- Modified SMS core: [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer)
+- Modified N64 core: [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer)
 - Modified PSX core: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
 - RetroAchievements: [retroachievements.org](https://retroachievements.org/)
 - rcheevos library: [RetroAchievements/rcheevos](https://github.com/RetroAchievements/rcheevos)
