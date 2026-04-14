@@ -17,6 +17,8 @@
 #include "osd.h"
 #include "cheats.h"
 #include "support.h"
+#include "achievements.h"
+#include "menu.h"
 
 struct cheat_rec_t
 {
@@ -476,6 +478,8 @@ void cheats_print()
 
 static void cheats_send()
 {
+	if (achievements_hardcore_active()) return;
+
 	static uint8_t buff[CHEAT_SIZE];
 	int pos = 0;
 
@@ -515,6 +519,11 @@ static void cheats_send()
 
 void cheats_toggle()
 {
+	if (achievements_hardcore_active()) {
+		Info("Hardcore Mode: cheats disabled", 3000);
+		return;
+	}
+
 	bool changedCheats = false;
 
 	if (cheats[iSelectedEntry].enabled == true)

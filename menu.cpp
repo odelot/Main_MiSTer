@@ -2591,8 +2591,11 @@ void HandleUI(void)
 						uint32_t n64_crc;
 						if (!n64_rom_tx(selPath, idx, load_addr, n64_crc)) 
                 Info("failed to load ROM");
-						else if (user_io_use_cheats() && !store_name) 
-                cheats_init(selPath, n64_crc);
+						else {
+							if (user_io_use_cheats() && !store_name) 
+                  cheats_init(selPath, n64_crc);
+							achievements_load_game(selPath, n64_crc);
+						}
 					}
 					else if (is_c64() || is_c128())
 					{
@@ -5522,7 +5525,11 @@ void HandleUI(void)
 
 		if (select)
 		{
-			cheats_toggle();
+			if (achievements_hardcore_active()) {
+				Info("Hardcore Mode: cheats disabled", 3000);
+			} else {
+				cheats_toggle();
+			}
 			menustate = MENU_CHEATS1;
 		}
 		break;

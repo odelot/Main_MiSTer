@@ -17,6 +17,10 @@
 // Magic number: "RACH" in little-endian
 #define RA_MAGIC 0x52414348
 
+// Per-core DDRAM base override (call before ra_ramread_map)
+void ra_ramread_set_base(uint32_t phys_base);
+uint32_t ra_ramread_get_base(void);
+
 // DDRAM base address for RA RAM mirror (physical address accessible via /dev/mem)
 // The FPGA writes to DDRAM at 0x3A00000, which maps to physical address:
 //   0x30000000 (DDRAM base) + 0x3A00000 = 0x33A00000
@@ -128,6 +132,7 @@ uint8_t  ra_snes_addrlist_read_cached(const void *map, uint32_t addr);
 int      ra_snes_addrlist_is_ready(const void *map);
 int      ra_snes_addrlist_count(void);
 const uint32_t *ra_snes_addrlist_addrs(void);  // Returns pointer to sorted address array
+uint32_t ra_snes_addrlist_request_id(void);     // Current expected request ID
 uint32_t ra_snes_addrlist_response_frame(const void *map);
 void     ra_snes_addrlist_diag_dump(const void *map);
 

@@ -40,4 +40,7 @@ int achievements_active(void);
 // Safe to call anytime — silently does nothing if menu is active.
 void achievements_info(void);
 
+// Returns 1 if hardcore mode is enabled in retroachievements.cfg
+int achievements_hardcore_active(void);
+
 #endif // ACHIEVEMENTS_H

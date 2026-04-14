@@ -7,9 +7,21 @@
 
 #define RA_DBG(fmt, ...) printf("\033[1;35mRA_MEM: " fmt "\033[0m\n", ##__VA_ARGS__)
 
+static uint32_t g_ra_ddram_base = RA_DDRAM_PHYS_BASE;
+
+void ra_ramread_set_base(uint32_t phys_base)
+{
+	g_ra_ddram_base = phys_base;
+}
+
+uint32_t ra_ramread_get_base(void)
+{
+	return g_ra_ddram_base;
+}
+
 void *ra_ramread_map(void)
 {
-	return shmem_map(RA_DDRAM_PHYS_BASE, RA_DDRAM_MAP_SIZE);
+	return shmem_map(g_ra_ddram_base, RA_DDRAM_MAP_SIZE);
 }
 
 void ra_ramread_unmap(void *map)
@@ -137,7 +149,7 @@ uint32_t ra_ramread_snes_read(const void *map, uint32_t address, uint8_t *buffer
 void ra_ramread_debug_dump(const void *map)
 {
 	RA_DBG("=== DDRAM Mirror Diagnostic Dump ===");
-	RA_DBG("Base address: 0x%08X (size: 0x%X)", RA_DDRAM_PHYS_BASE, RA_DDRAM_MAP_SIZE);
+	RA_DBG("Base address: 0x%08X (size: 0x%X)", g_ra_ddram_base, RA_DDRAM_MAP_SIZE);
 
 	if (!map) {
 		RA_DBG("ERROR: map pointer is NULL");
@@ -337,6 +349,11 @@ int ra_snes_addrlist_count(void)
 const uint32_t *ra_snes_addrlist_addrs(void)
 {
 	return s_snes_addrs;
+}
+
+uint32_t ra_snes_addrlist_request_id(void)
+{
+	return s_snes_request_id;
 }
 
 uint32_t ra_snes_addrlist_response_frame(const void *map)

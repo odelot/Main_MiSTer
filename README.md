@@ -2,7 +2,7 @@
 
 This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-devel/Main_MiSTer) with **RetroAchievements** support for MiSTer FPGA.
 
-> **Status:** Experimental / Proof of Concept — currently the **NES**, **SNES**, **Genesis / Mega Drive**, and **PSX** cores are supported.
+> **Status:** Experimental / Proof of Concept
 
 ## Supported Cores
 
@@ -11,11 +11,25 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | NES | 7 | [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) |
 | SNES | 3 | [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer) |
 | Genesis / Mega Drive | 1 | [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer) |
+| Master System / Game Gear | 11 | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
 | PSX | 12 | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
+
+## How to Test
+
+Pre-built binaries are available on the [Releases](https://github.com/odelot/Main_MiSTer/releases) page — no compilation needed.
+
+1. Download the latest release and extract all files.
+2. Edit `retroachievements.cfg` with your [RetroAchievements](https://retroachievements.org/) credentials (username and password).
+3. Copy all files to `/media/fat` on your MiSTer SD card.
+4. You will also need the modified core for the console you want to play. See the table above for the corresponding core repo (each one has its own release binaries).
+
+For example, for **Master System / Game Gear**, get the modified SMS core from [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer).
 
 ## What's Different from the Original
 
-The upstream Main_MiSTer binary manages cores, user input, video output, and the OSD menu on the MiSTer platform. This fork adds a full RetroAchievements integration layer on top of that, without modifying any existing core functionality. The following files were **added**:
+The [upstream Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer) binary manages cores, user input, video output, and the OSD menu on the MiSTer platform. This fork adds a full RetroAchievements integration layer on top, without modifying any existing core functionality.
+
+### Files Added
 
 | File | Purpose |
 |------|--------|
@@ -26,46 +40,56 @@ The upstream Main_MiSTer binary manages cores, user input, video output, and the
 | `retroachievements.cfg` | User credentials file (username / password) |
 | `lib/rcheevos/` | The [rcheevos](https://github.com/RetroAchievements/rcheevos) library (achievement logic, server protocol) |
 
-Minor modifications were made to existing files to hook into the main loop:
+### Files Modified (hooks into the main loop)
 
-- **`scheduler.cpp`** — calls `achievements_poll()` every frame
-- **`menu.cpp`** — calls `achievements_load_game()` when a ROM is selected
-- **`main.cpp`** — calls `achievements_init()` / `achievements_deinit()` at startup/shutdown
-- **`Makefile`** — conditionally compiles rcheevos sources and links against them
+| File | Change |
+|------|--------|
+| `scheduler.cpp` | Calls `achievements_poll()` every frame |
+| `menu.cpp` | Calls `achievements_load_game()` when a ROM is selected |
+| `main.cpp` | Calls `achievements_init()` / `achievements_deinit()` at startup/shutdown |
+| `Makefile` | Conditionally compiles rcheevos sources and links against them |
 
 No other existing behavior is changed.
 
 ## Architecture
 
-The RetroAchievements integration uses a four-layer pipeline:
+The RetroAchievements integration uses a four-layer pipeline that connects the FPGA hardware to the RetroAchievements server:
 
 ```
-┌─────────────────────────────────────────────────┐
-│  FPGA Core (NES / SNES / Genesis / PSX)           │
-│  ra_ram_mirror*.sv exposes emulated RAM to DDRAM  │
-│  every VBlank (~60 Hz)                           │
-└──────────────────┬──────────────────────────────┘
-                   │  DDRAM at physical 0x3D000000
-                   ▼
-┌─────────────────────────────────────────────────┐
-│  ARM Binary (this repo)                          │
-│  shmem.cpp  — mmap /dev/mem to read DDRAM        │
-│  ra_ramread — parse header, map console addresses │
-└──────────────────┬──────────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────────┐
-│  rcheevos SDK                                    │
-│  Evaluates achievement conditions against RAM    │
-│  Manages unlock state, leaderboards, progress    │
-└──────────────────┬──────────────────────────────┘
-                   │  Async HTTP (ra_http worker)
-                   ▼
-┌─────────────────────────────────────────────────┐
-│  RetroAchievements Server                        │
-│  Login, game identification, unlock reporting    │
-└─────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│  FPGA Core (NES / SNES / Genesis / SMS / PSX)         │
+│  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
+│  every VBlank (~60 Hz)                                │
+└──────────────────────┬────────────────────────────────┘
+                       │  DDRAM at physical 0x3D000000
+                       ▼
+┌───────────────────────────────────────────────────────┐
+│  ARM Binary (this repo)                               │
+│  shmem.cpp  — mmap /dev/mem to read DDRAM             │
+│  ra_ramread — parse header, map console addresses     │
+└──────────────────────┬────────────────────────────────┘
+                       │
+                       ▼
+┌───────────────────────────────────────────────────────┐
+│  rcheevos SDK                                         │
+│  Evaluates achievement conditions against RAM         │
+│  Manages unlock state, leaderboards, progress         │
+└──────────────────────┬────────────────────────────────┘
+                       │  Async HTTP (ra_http worker)
+                       ▼
+┌───────────────────────────────────────────────────────┐
+│  RetroAchievements Server                             │
+│  Login, game identification, unlock reporting         │
+└───────────────────────────────────────────────────────┘
 ```
+
+### How It Works
+
+1. **Init** — On startup, the ARM binary maps the DDRAM mirror region, starts an HTTP worker thread, loads credentials from `retroachievements.cfg`, and logs in to RetroAchievements.
+2. **Load Game** — When a ROM is selected in the MiSTer menu, the binary computes the ROM's MD5 hash and identifies the game against the RA database.
+3. **Per-Frame Poll** — Every frame (~60 Hz), `achievements_poll()` checks whether the FPGA has written new data. If a new frame is available, it calls `rc_client_do_frame()` from the rcheevos library, which evaluates achievement conditions against the current RAM state.
+4. **Unlock / Notify** — When an achievement triggers, the event handler displays an OSD notification and optionally plays a sound (`/media/fat/achievement.wav`). The unlock is reported to the RA server asynchronously.
+5. **Unload / Shutdown** — State is cleaned up when switching cores or shutting down.
 
 ### DDRAM Mirror Layout
 
@@ -74,28 +98,40 @@ Every supported core writes a structured block at ARM physical address `0x3D0000
 | Offset | Content |
 |--------|---------|
 | `0x00000` | Header: magic `"RACH"`, region count, flags (busy bit), frame counter |
-| `0x00100+` | RAM data area (layout varies per core) |
-| `0x40000` | Address request list — ARM writes here (Option C protocol) |
-| `0x48000` | Value response cache — FPGA writes results here |
+| `0x00100+` | RAM data area (layout varies per core — used by Full Mirror protocol) |
+| `0x40000` | Address request list — ARM writes here (Selective Address protocol) |
+| `0x48000` | Value response cache — FPGA writes results here (Selective Address protocol) |
 
 ### Per-Core RAM Exposure Strategy
+
+There are two protocols for exposing emulated RAM to the ARM:
+
+- **Full Mirror** — The FPGA copies all relevant RAM to DDRAM every VBlank. Simple but only viable for small RAM spaces.
+- **Selective Address (Option C)** — The ARM writes a list of addresses it needs; the FPGA reads only those values and writes them back. Required for cores with large address spaces.
 
 #### NES — Full Mirror (`ra_ram_mirror.sv`)
 The FPGA copies all relevant RAM to DDRAM on every VBlank (~10 KB total):
 - **CPU-RAM** ($0000–$07FF) — 2 KB
 - **Cart SRAM** ($6000–$7FFF) — 8 KB
 
-#### SNES — Selective Address Protocol (`ra_ram_mirror_snes.sv`)
+#### SNES — Selective Address (`ra_ram_mirror_snes.sv`)
 Due to the larger RAM space, the ARM binary writes the list of addresses it needs, and the FPGA reads only those (~185 per frame):
 - **WRAM** ($000000–$01FFFF) — 128 KB
 - **BSRAM** ($020000+) — up to 256 KB
 
-#### Genesis / Mega Drive — Selective Address Protocol (`ra_ram_mirror_md.sv`)
+#### Genesis / Mega Drive — Selective Address (`ra_ram_mirror_md.sv`)
 Same request/response protocol. The FPGA reads requested addresses directly from the 68K Work RAM BRAM:
 - **68K Work RAM** ($000000–$00FFFF) — 64 KB
 - Includes hardware-accurate FC1004 address bit-13 inversion for correct BRAM mapping
 
-#### PSX — Selective Address Protocol (`ra_ram_mirror_psx.sv`)
+#### Master System / Game Gear — Selective Address (`ra_ram_mirror_sms.sv`)
+Uses the same selective address protocol. The FPGA reads from dual-ported System RAM and NVRAM:
+- **System RAM** ($0000–$1FFF) — 8 KB (Z80 $C000–$DFFF mirrored)
+- **NVRAM / Cart RAM** ($2000–$9FFF) — up to 32 KB
+
+The SMS core converts its existing single-port RAMs to dual-port (`dpram`) so the RA mirror can read on Port B without disturbing the CPU on Port A. A custom DDRAM arbiter (`ddram_arb_sms.sv`) shares bus access between the framebuffer and the RA mirror.
+
+#### PSX — Selective Address (`ra_ram_mirror_psx.sv`)
 Same request/response protocol. The FPGA reads requested addresses from SDRAM via a dedicated channel (CH4):
 - **Main RAM** ($000000–$1FFFFF) — 2 MB
 
