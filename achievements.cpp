@@ -157,6 +157,7 @@ static uint32_t g_psx_last_resp_frame = 0;
 static uint32_t g_psx_game_frames = 0;
 static uint32_t g_psx_poll_logged = 0;
 static struct timespec g_psx_cache_time;
+static int g_psx_rtquery = 0;           // 1 if FPGA supports realtime queries
 
 // MegaDrive/Genesis state (Option C, same infrastructure)
 static int g_md_optionc = 0;
@@ -213,6 +214,8 @@ static struct timespec g_gba_cache_time;
 static int g_neogeo_optionc = 0;
 static int g_neogeo_collecting = 0;
 static int g_neogeo_cache_ready = 0;
+static int g_neogeo_needs_recollect = 0;
+static int g_neogeo_resolve_pass = 0;
 static uint32_t g_neogeo_last_resp_frame = 0;
 static uint32_t g_neogeo_game_frames = 0;
 static uint32_t g_neogeo_poll_logged = 0;
@@ -778,6 +781,13 @@ static uint32_t ra_read_memory(uint32_t address, uint8_t *buffer,
 						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
 					return num_bytes;
 				}
+				// Realtime query fallback for addresses not in batch cache
+				if (g_psx_rtquery && !g_psx_collecting && num_bytes <= 4) {
+					uint32_t val = ra_rtquery_read(g_ra_map, address, num_bytes);
+					for (uint32_t i = 0; i < num_bytes; i++)
+						buffer[i] = (uint8_t)(val >> (i * 8));
+					return num_bytes;
+				}
 				memset(buffer, 0, num_bytes);
 				return num_bytes;
 			}
@@ -863,14 +873,15 @@ static uint32_t ra_read_memory(uint32_t address, uint8_t *buffer,
 			memset(buffer, 0, num_bytes);
 			return num_bytes;
 		case 27: // RC_CONSOLE_ARCADE (NeoGeo)
+			// NeoGeo 68K big-endian: XOR addr bit 0 to match RA LE-host convention
 			if (g_neogeo_optionc) {
 				if (g_neogeo_collecting) {
 					for (uint32_t i = 0; i < num_bytes; i++)
-						ra_snes_addrlist_add(address + i);
+						ra_snes_addrlist_add((address + i) ^ 1);
 				}
 				if (g_neogeo_cache_ready) {
 					for (uint32_t i = 0; i < num_bytes; i++)
-						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
+						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, (address + i) ^ 1);
 					return num_bytes;
 				}
 				memset(buffer, 0, num_bytes);
@@ -1425,6 +1436,8 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 	g_neogeo_optionc = 0;
 	g_neogeo_collecting = 0;
 	g_neogeo_cache_ready = 0;
+	g_neogeo_needs_recollect = 0;
+	g_neogeo_resolve_pass = 0;
 	g_neogeo_last_resp_frame = 0;
 	g_neogeo_game_frames = 0;
 	g_neogeo_poll_logged = 0;
@@ -1537,6 +1550,14 @@ void achievements_poll(void)
 			if (ra_get_console_id() == 12) {
 				g_psx_optionc = 1;
 				RA_LOG("PSX FPGA protocol: Option C (selective address reading)");
+					if (ra_rtquery_supported(g_ra_map)) {
+						g_psx_rtquery = 1;
+						ra_rtquery_init(g_ra_map);
+						RA_LOG("PSX: Realtime queries supported (FPGA v2+)");
+					} else {
+						g_psx_rtquery = 0;
+						RA_LOG("PSX: Realtime queries NOT supported (FPGA v1)");
+					}
 			}
 			if (ra_get_console_id() == 1) {
 				g_md_optionc = 1;
@@ -1821,6 +1842,52 @@ void achievements_poll(void)
 				g_gba_cache_ready ? "active" : "waiting",
 				ra_snes_addrlist_response_frame(g_ra_map),
 				g_gba_game_frames);
+		} else if (console == 27 && g_neogeo_optionc) {
+			// NeoGeo Option C: show address cache status and value dump
+			RA_LOG("NeoGeo OptionC: addrs=%d cache=%s resp_frame=%u game_frames=%u",
+				ra_snes_addrlist_count(),
+				g_neogeo_cache_ready ? "active" : "waiting",
+				ra_snes_addrlist_response_frame(g_ra_map),
+				g_neogeo_game_frames);
+			if (g_neogeo_cache_ready && g_ra_map) {
+				const uint8_t *vals = (const uint8_t *)g_ra_map + 0x48000 + 8;
+				int cnt = ra_snes_addrlist_count();
+				int dump_len = cnt < 52 ? cnt : 52;
+				int non_zero = 0;
+				char hex[400];
+				int pos = 0;
+				for (int i = 0; i < dump_len && pos < (int)sizeof(hex) - 4; i++) {
+					pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", vals[i]);
+					if (vals[i]) non_zero++;
+				}
+				RA_LOG("VALCACHE[0..%d]: %s (%d non-zero)", dump_len - 1, hex, non_zero);
+				// Dump address list
+				const uint32_t *addrs = ra_snes_addrlist_addrs();
+				char ahex[400];
+				int apos = 0;
+				for (int i = 0; i < dump_len && apos < (int)sizeof(ahex) - 8; i++)
+					apos += snprintf(ahex + apos, sizeof(ahex) - apos, "%04X ", addrs[i]);
+				RA_LOG("ADDRLIST[0..%d]: %s (total=%d)", dump_len - 1, ahex, cnt);
+				// FPGA debug words
+				const uint8_t *base = (const uint8_t *)g_ra_map;
+				const uint64_t *dbg1 = (const uint64_t *)(base + 0x10);
+				uint64_t d1 = *dbg1;
+				uint8_t  fpga_ver     = (d1 >> 56) & 0xFF;
+				uint8_t  dispatch_cnt = (d1 >> 48) & 0xFF;
+				uint16_t ok_cnt       = (d1 >> 32) & 0xFFFF;
+				uint16_t oob_cnt      = (d1 >> 16) & 0xFFFF;
+				RA_LOG("NeoGeo FPGA: ver=0x%02X dispatch=%u ok=%u oob=%u",
+					fpga_ver, dispatch_cnt, ok_cnt, oob_cnt);
+				// Debug records (first 2 addresses)
+				const uint64_t *dbg2 = (const uint64_t *)(base + 0x18);
+				uint64_t d2 = *dbg2;
+				uint32_t rec0 = d2 & 0xFFFFFFFF;
+				uint32_t rec1 = (d2 >> 32) & 0xFFFFFFFF;
+				RA_LOG("NeoGeo REC[0]: bram=0x%04X a0=%u wraml=0x%02X wramu=0x%02X",
+					(rec0 >> 17) & 0x7FFF, (rec0 >> 16) & 1, (rec0 >> 8) & 0xFF, rec0 & 0xFF);
+				RA_LOG("NeoGeo REC[1]: bram=0x%04X a0=%u wraml=0x%02X wramu=0x%02X",
+					(rec1 >> 17) & 0x7FFF, (rec1 >> 16) & 1, (rec1 >> 8) & 0xFF, rec1 & 0xFF);
+			}
 		} else {
 			// NES: region-based layout
 			const uint8_t *cpuram = ra_ramread_region_data(g_ra_map, 0);
@@ -2578,27 +2645,33 @@ void achievements_poll(void)
 	// ================================================================
 	if (g_client && g_game_loaded && ra_get_console_id() == 27 && g_neogeo_optionc) {
 		if (ra_snes_addrlist_count() == 0 && !g_neogeo_cache_ready) {
-			// Bootstrap: run one do_frame with zeros to discover needed addresses
+			// Phase 1: Bootstrap — collect addresses with zeros
 			g_neogeo_collecting = 1;
 			ra_snes_addrlist_begin_collect();
 			rc_client_do_frame(g_client);
 			g_neogeo_collecting = 0;
 			int changed = ra_snes_addrlist_end_collect(g_ra_map);
 			if (changed) {
+				g_neogeo_needs_recollect = 1;
+				g_neogeo_resolve_pass = 0;
 				RA_LOG("NeoGeo OptionC: Bootstrap collection done, %d addrs written to DDRAM",
 					ra_snes_addrlist_count());
 			} else {
 				RA_LOG("NeoGeo OptionC: No addresses collected");
 			}
 		} else if (!g_neogeo_cache_ready) {
-			// Wait for FPGA to respond with cached values
+			// Phase 2/4: Wait for FPGA cache
 			if (ra_snes_addrlist_is_ready(g_ra_map)) {
 				g_neogeo_cache_ready = 1;
 				g_neogeo_last_resp_frame = 0;
 				g_neogeo_game_frames = 0;
 				g_neogeo_poll_logged = 0;
 				clock_gettime(CLOCK_MONOTONIC, &g_neogeo_cache_time);
-				RA_LOG("NeoGeo OptionC: Cache active! FPGA response matched request.");
+				if (g_neogeo_needs_recollect) {
+					RA_LOG("NeoGeo OptionC: Cache active (pre-recollect). Will resolve pointers.");
+				} else {
+					RA_LOG("NeoGeo OptionC: Cache active! FPGA response matched request.");
+				}
 				const uint32_t *a0 = ra_snes_addrlist_addrs();
 				int ac = ra_snes_addrlist_count();
 				int ad = ac < 20 ? ac : 20;
@@ -2607,8 +2680,33 @@ void achievements_poll(void)
 					ap += snprintf(ah + ap, sizeof(ah) - ap, "%04X ", a0[i]);
 				RA_LOG("ADDRLIST[0..%d]: %s (total=%d)", ad - 1, ah, ac);
 			}
+		} else if (g_neogeo_needs_recollect) {
+			// Phase 3: Pointer-resolution re-collection
+			// Now that cache has real values, AddAddress conditions will
+			// compute correct derived addresses from pointer base values.
+			g_neogeo_resolve_pass++;
+			g_neogeo_collecting = 1;
+			ra_snes_addrlist_begin_collect();
+			rc_client_do_frame(g_client);
+			g_neogeo_collecting = 0;
+			int changed = ra_snes_addrlist_end_collect(g_ra_map);
+			if (changed && g_neogeo_resolve_pass < 4) {
+				RA_LOG("NeoGeo OptionC: Pointer-resolve pass %d, %d addrs (changed, retrying)",
+					g_neogeo_resolve_pass, ra_snes_addrlist_count());
+				g_neogeo_cache_ready = 0; // wait for new FPGA data
+			} else {
+				g_neogeo_needs_recollect = 0;
+				if (changed) {
+					RA_LOG("NeoGeo OptionC: Pointer-resolve done (max passes), %d addrs",
+						ra_snes_addrlist_count());
+					g_neogeo_cache_ready = 0;
+				} else {
+					RA_LOG("NeoGeo OptionC: Pointer-resolve complete, no address changes (%d addrs)",
+						ra_snes_addrlist_count());
+				}
+			}
 		} else {
-			// Normal frame processing from cache
+			// Phase 5: Normal frame processing from cache
 			uint32_t resp_frame = ra_snes_addrlist_response_frame(g_ra_map);
 			if (resp_frame > g_neogeo_last_resp_frame) {
 				g_neogeo_last_resp_frame = resp_frame;
@@ -2616,8 +2714,8 @@ void achievements_poll(void)
 				g_frames_processed++;
 				g_neogeo_game_frames++;
 
-				// Re-collect every ~5 min to catch address changes
-				int re_collect = (g_neogeo_game_frames % 18000 == 0) && (g_neogeo_game_frames > 0);
+				// Re-collect every 600 frames (~10s) to track pointer changes
+				int re_collect = (g_neogeo_game_frames % 600 == 0) && (g_neogeo_game_frames > 0);
 				if (re_collect) {
 					g_neogeo_collecting = 1;
 					ra_snes_addrlist_begin_collect();
@@ -2630,6 +2728,7 @@ void achievements_poll(void)
 					if (ra_snes_addrlist_end_collect(g_ra_map)) {
 						RA_LOG("NeoGeo OptionC: Address list refreshed, %d addrs",
 							ra_snes_addrlist_count());
+						g_neogeo_cache_ready = 0; // wait for new FPGA data
 					}
 				}
 			}
@@ -2841,6 +2940,8 @@ void achievements_unload_game(void)
 	g_neogeo_optionc = 0;
 	g_neogeo_collecting = 0;
 	g_neogeo_cache_ready = 0;
+	g_neogeo_needs_recollect = 0;
+	g_neogeo_resolve_pass = 0;
 	g_neogeo_last_resp_frame = 0;
 	g_neogeo_game_frames = 0;
 	g_neogeo_poll_logged = 0;

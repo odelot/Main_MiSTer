@@ -397,3 +397,83 @@ void ra_snes_addrlist_diag_dump(const void *map)
 	const ra_addr_req_hdr_t *ahdr = (const ra_addr_req_hdr_t *)(base + RA_SNES_ADDRLIST_OFFSET);
 	RA_DBG("ADDRLIST hdr in DDRAM: count=%u req_id=%u", ahdr->addr_count, ahdr->request_id);
 }
+
+// ======================================================================
+// Realtime Query Mailbox (Option C "on steroids")
+// ======================================================================
+
+static uint8_t s_rtquery_seq = 0;
+
+void ra_rtquery_init(void *map)
+{
+        s_rtquery_seq = 0;
+        if (!map) return;
+
+        // Clear the control word so FPGA sees no pending request
+        uint8_t *base = (uint8_t *)map;
+        ra_query_ctrl_t *ctrl = (ra_query_ctrl_t *)(base + RA_QUERY_CTRL_OFFSET);
+        memset(ctrl, 0, sizeof(*ctrl));
+        __sync_synchronize();
+        RA_DBG("RTQuery: initialized (mailbox at offset 0x%X)", RA_QUERY_CTRL_OFFSET);
+}
+
+uint32_t ra_rtquery_read(void *map, uint32_t address, uint32_t num_bytes)
+{
+        if (!map || num_bytes == 0 || num_bytes > 4) return 0;
+
+        uint8_t *base = (uint8_t *)map;
+        ra_query_ctrl_t *ctrl = (ra_query_ctrl_t *)(base + RA_QUERY_CTRL_OFFSET);
+        ra_query_req_t  *req  = (ra_query_req_t *)(base + RA_QUERY_REQ_OFFSET);
+        ra_query_resp_t *resp = (ra_query_resp_t *)(base + RA_QUERY_RESP_OFFSET);
+
+        // Fill single query slot
+        req[0].address   = address;
+        req[0].num_bytes = (uint8_t)num_bytes;
+        __sync_synchronize();
+
+        // Increment sequence and write control
+        s_rtquery_seq++;
+        if (s_rtquery_seq == 0) s_rtquery_seq = 1;  // Never use 0
+
+        ctrl->num_queries = 1;
+        ctrl->request_seq = s_rtquery_seq;
+        __sync_synchronize();
+
+        // Busy-wait for FPGA response (typically 5-50µs)
+        volatile ra_query_ctrl_t *vctrl = (volatile ra_query_ctrl_t *)ctrl;
+        int timeout = 100000;  // ~100ms safety limit at ~1µs per iteration
+        while (vctrl->response_seq != s_rtquery_seq && --timeout > 0) {
+                // Spin
+        }
+
+        if (timeout <= 0) {
+                // Timeout — FPGA didn't respond
+                return 0;
+        }
+
+        // Read result
+        volatile ra_query_resp_t *vresp = (volatile ra_query_resp_t *)resp;
+        uint32_t value = vresp[0].value;
+
+        // Mask to requested byte count
+        if (num_bytes < 4) {
+                value &= (1u << (num_bytes * 8)) - 1;
+        }
+
+        return value;
+}
+
+int ra_rtquery_supported(const void *map)
+{
+        // Check FPGA version in debug word at DDRAM_BASE + 0x10
+        // Debug word 1: {ver(8), dispatch_cnt(8), first_dout(16), timeout_cnt(16), ok_cnt(16)}
+        // ver is at byte offset 0x17 (top byte of the 64-bit word at offset 0x10)
+        if (!map) return 0;
+        const uint8_t *base = (const uint8_t *)map;
+        // The debug word is at DDRAM offset 0x10 (word index 2)
+        // In the 64-bit word: FPGA_VERSION is in bits [63:56] = byte[7] of the word
+        // At byte offset 0x10 + 7 = 0x17
+        uint8_t ver = base[0x17];
+        return ver >= 0x02;
+}
+

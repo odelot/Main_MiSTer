@@ -74,6 +74,55 @@ typedef struct __attribute__((packed)) {
 #define RA_SNES_VALCACHE_OFFSET  0x48000   // FPGA → ARM: value response table
 #define RA_SNES_MAX_ADDRS        4096      // Max tracked addresses
 
+// ======================================================================
+// Realtime Query Mailbox (Option C "on steroids")
+// ARM writes query addresses, FPGA reads SDRAM, writes values back.
+// Used for AddAddress pointer resolution during rc_client_do_frame().
+// ======================================================================
+#define RA_QUERY_CTRL_OFFSET     0x50000   // Control word (8 bytes)
+#define RA_QUERY_REQ_OFFSET      0x50008   // Request slots (16 × 8 bytes)
+#define RA_QUERY_RESP_OFFSET     0x50088   // Response slots (16 × 8 bytes)
+#define RA_QUERY_MAX_SLOTS       16
+
+// Control word layout (8 bytes at QUERY_CTRL_OFFSET):
+//   [0] request_seq    (uint8_t)  ARM increments to signal new batch
+//   [1] num_queries    (uint8_t)  Number of queries (1-16)
+//   [2-3] reserved
+//   [4] response_seq   (uint8_t)  FPGA writes = request_seq when done
+//   [5-7] reserved
+//
+// Request slot layout (8 bytes each at QUERY_REQ_OFFSET + i*8):
+//   [0-3] address      (uint32_t) Byte address in game RAM
+//   [4]   num_bytes    (uint8_t)  Bytes to read (1-4)
+//   [5-7] reserved
+//
+// Response slot layout (8 bytes each at QUERY_RESP_OFFSET + i*8):
+//   [0-3] value        (uint32_t) Value read from game RAM (little-endian)
+//   [4-7] reserved
+
+typedef struct __attribute__((packed)) {
+        uint8_t  request_seq;
+        uint8_t  num_queries;
+        uint16_t reserved1;
+        uint8_t  response_seq;
+        uint8_t  reserved2[3];
+} ra_query_ctrl_t;
+
+typedef struct __attribute__((packed)) {
+        uint32_t address;
+        uint8_t  num_bytes;
+        uint8_t  reserved[3];
+} ra_query_req_t;
+
+typedef struct __attribute__((packed)) {
+        uint32_t value;
+        uint32_t reserved;
+} ra_query_resp_t;
+
+// Realtime query API — generic, works with any Option C core
+void     ra_rtquery_init(void *map);
+uint32_t ra_rtquery_read(void *map, uint32_t address, uint32_t num_bytes);
+
 // Address request header at ADDRLIST_OFFSET (ARM writes)
 typedef struct __attribute__((packed)) {
 	uint32_t addr_count;    // Number of addresses
@@ -142,5 +191,8 @@ void ra_ramread_debug_dump(const void *map);
 
 // Print a one-line status summary (for periodic logging)
 void ra_ramread_debug_status(const void *map);
+
+// Realtime query: check if FPGA supports it (version >= 2)
+int ra_rtquery_supported(const void *map);
 
 #endif // RA_RAMREAD_H
