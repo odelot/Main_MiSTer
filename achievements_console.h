@@ -17,6 +17,7 @@ typedef struct {
 	uint32_t last_resp_frame; // Last processed response frame
 	uint32_t game_frames;     // Frames processed since cache active
 	uint32_t poll_logged;     // Last game_frames milestone logged
+	int resolve_pass;         // Current pointer-resolution pass number
 	struct timespec cache_time; // Timestamp when cache became active
 } console_state_t;
 

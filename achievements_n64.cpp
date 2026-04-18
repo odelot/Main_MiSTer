@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #ifdef HAS_RCHEEVOS
 #include "rc_client.h"
@@ -19,6 +20,8 @@
 // ---------------------------------------------------------------------------
 
 static console_state_t g_n64_state = {};
+static uint8_t *g_n64_progress_buf = NULL;
+static size_t   g_n64_progress_size = 0;
 
 // ---------------------------------------------------------------------------
 // N64 Implementation
@@ -27,6 +30,8 @@ static console_state_t g_n64_state = {};
 static void n64_init(void)
 {
 	memset(&g_n64_state, 0, sizeof(g_n64_state));
+	g_n64_progress_buf = NULL;
+	g_n64_progress_size = 0;
 	ra_snes_addrlist_init();
 	
 	// N64 uses special DDRAM base to avoid save state collision
@@ -43,6 +48,9 @@ static void n64_reset(void)
 	g_n64_state.last_resp_frame = 0;
 	g_n64_state.game_frames = 0;
 	g_n64_state.poll_logged = 0;
+	g_n64_state.resolve_pass = 0;
+	if (g_n64_progress_buf) { free(g_n64_progress_buf); g_n64_progress_buf = NULL; }
+	g_n64_progress_size = 0;
 }
 
 static uint32_t n64_read_memory(void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes)
@@ -75,29 +83,49 @@ static void n64_poll(void *map, void *client, int game_loaded)
 	// N64 has 5 phases like PSX: bootstrap, wait, pointer-resolution, wait, normal
 	if (ra_snes_addrlist_count() == 0 && !g_n64_state.cache_ready) {
 		// Phase 1: Bootstrap
+		// Save rcheevos state before collection to prevent delta corruption
+		size_t psize = rc_client_progress_size(rc_client);
+		if (psize > g_n64_progress_size) {
+			free(g_n64_progress_buf);
+			g_n64_progress_buf = (uint8_t *)malloc(psize);
+			g_n64_progress_size = psize;
+		}
+		if (g_n64_progress_buf)
+			rc_client_serialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
 		g_n64_state.collecting = 1;
 		ra_snes_addrlist_begin_collect();
 		rc_client_do_frame(rc_client);
 		g_n64_state.collecting = 0;
+		// Restore state (undo delta/hit changes from zero-value reads)
+		if (g_n64_progress_buf)
+			rc_client_deserialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
 		int changed = ra_snes_addrlist_end_collect(map);
 		if (changed) {
 			ra_log_write("N64 OptionC: Bootstrap collection done, %d addrs\n",
 				ra_snes_addrlist_count());
 			g_n64_state.needs_recollect = 1;
+			g_n64_state.resolve_pass = 0;
 		}
 	} else if (!g_n64_state.cache_ready && g_n64_state.needs_recollect) {
-		// Phase 2 & 3: Wait and pointer-resolution
+		// Phase 2 & 3: Iterative pointer-resolution for multi-level AddAddress
 		if (ra_snes_addrlist_is_ready(map)) {
-			ra_log_write("N64 OptionC: Doing pointer resolution pass\n");
+			g_n64_state.resolve_pass++;
+			ra_log_write("N64 OptionC: Pointer resolution pass %d\n", g_n64_state.resolve_pass);
 			g_n64_state.collecting = 1;
 			ra_snes_addrlist_begin_collect();
 			rc_client_do_frame(rc_client);
 			g_n64_state.collecting = 0;
-			if (ra_snes_addrlist_end_collect(map)) {
-				ra_log_write("N64 OptionC: Pointer-resolution done, %d addrs\n",
-					ra_snes_addrlist_count());
+			int changed = ra_snes_addrlist_end_collect(map);
+			if (changed && g_n64_state.resolve_pass < 4) {
+				ra_log_write("N64 OptionC: Pass %d found new addrs, %d total - re-resolving\n",
+					g_n64_state.resolve_pass, ra_snes_addrlist_count());
+				// Stay in needs_recollect to do another pass once cache is ready
+			} else {
+				ra_log_write("N64 OptionC: Pointer-resolution %s after %d passes, %d addrs\n",
+					changed ? "done (max passes)" : "stable",
+					g_n64_state.resolve_pass, ra_snes_addrlist_count());
+				g_n64_state.needs_recollect = 0;
 			}
-			g_n64_state.needs_recollect = 0;
 		}
 	} else if (!g_n64_state.cache_ready) {
 		// Phase 4: Final cache wait
@@ -108,6 +136,9 @@ static void n64_poll(void *map, void *client, int game_loaded)
 			g_n64_state.poll_logged = 0;
 			clock_gettime(CLOCK_MONOTONIC, &g_n64_state.cache_time);
 			ra_log_write("N64 OptionC: Cache active!\n");
+			// Restore rcheevos state saved before resolution began
+			if (g_n64_progress_buf)
+				rc_client_deserialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
 		}
 	} else {
 		// Phase 5: Normal processing
@@ -126,9 +157,18 @@ static void n64_poll(void *map, void *client, int game_loaded)
 				ra_log_write("  SM64: MapID=%02X HP=%02X Lives=%02X\n", map_id, hp, lives);
 			}
 
-			// Re-collect every 600 frames (~10s)
+			// Re-collect every 600 frames (~10s) with multi-pass for AddAddress
 			int re_collect = (g_n64_state.game_frames % 600 == 0) && (g_n64_state.game_frames > 0);
 			if (re_collect) {
+				// Save state before re-collection
+				size_t psize = rc_client_progress_size(rc_client);
+				if (psize > g_n64_progress_size) {
+					free(g_n64_progress_buf);
+					g_n64_progress_buf = (uint8_t *)malloc(psize);
+					g_n64_progress_size = psize;
+				}
+				if (g_n64_progress_buf)
+					rc_client_serialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
 				g_n64_state.collecting = 1;
 				ra_snes_addrlist_begin_collect();
 			}
@@ -138,8 +178,15 @@ static void n64_poll(void *map, void *client, int game_loaded)
 			if (re_collect) {
 				g_n64_state.collecting = 0;
 				if (ra_snes_addrlist_end_collect(map)) {
-					ra_log_write("N64 OptionC: Address list refreshed, %d addrs\n",
+					ra_log_write("N64 OptionC: Address list refreshed, %d addrs - scheduling re-resolve\n",
 						ra_snes_addrlist_count());
+					g_n64_state.cache_ready = 0;
+					g_n64_state.needs_recollect = 1;
+					g_n64_state.resolve_pass = 0;
+				} else {
+					// No change, restore state
+					if (g_n64_progress_buf)
+						rc_client_deserialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
 				}
 			}
 		}
