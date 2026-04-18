@@ -157,6 +157,27 @@ Key differences from other cores:
 Same request/response protocol. The FPGA reads requested addresses from SDRAM via a dedicated channel (CH4):
 - **Main RAM** ($000000–$1FFFFF) — 2 MB
 
+### `AddAddress` Support — Pointer Resolution
+
+Several achievement conditions use the `AddAddress` operator, which reads a pointer from memory and adds its value to a base address to obtain the actual memory location to evaluate. In the Selective Address protocol, this creates a bootstrapping problem: on first collection, all cached values are zero, so `AddAddress` conditions compute `base + 0` and only request the pointer address itself — the real target address cannot be known until the pointer's actual value is available.
+
+To solve this, cores that use the Selective Address protocol run a multi-phase pointer-resolution sequence on game load:
+
+1. **Bootstrap** — `rc_client_do_frame()` runs once in *collect mode* with all values assumed zero. This discovers the initial set of addresses, including pointer base addresses.
+2. **FPGA response** — The ARM waits for the FPGA to fill the value cache with real data.
+3. **Pointer-resolution pass** — `rc_client_do_frame()` runs again in collect mode, now with real pointer values. This resolves derived target addresses that were invisible in the bootstrap pass. For **N64**, this step is repeated up to **4 times** to handle chains of nested `AddAddress` conditions (each pass may reveal addresses that depend on values discovered in the previous pass).
+4. **Resume normal processing** — Once the address list stabilises and the final FPGA response arrives, the pipeline enters its normal per-frame polling loop.
+
+**State preservation**: Before and after each bootstrap or resolution pass, the rcheevos client state is serialized (`rc_client_serialize_progress`) and restored afterwards. This prevents zero-value reads during collection from spuriously incrementing hit counters or triggering delta conditions, keeping achievement evaluation correct.
+
+**Periodic re-collection**: During normal gameplay the address list is refreshed to account for pointer changes at runtime (e.g., a game reallocating a data structure):
+
+| Core | Re-collection interval | Re-resolves on change? |
+|------|------------------------|------------------------|
+| SNES | every ~5 min (~18 000 frames) | No |
+| PSX | every ~10 s (~600 frames) | Yes (1 pass) |
+| N64 | every ~10 s (~600 frames) | Yes (up to 4 passes) |
+
 ### ROM / Disc Hashing
 
 | Core | Method |
