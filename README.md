@@ -15,6 +15,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | Gameboy / Gameboy Color | 4 | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
 | N64 | 2 | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
 | PSX | 12 | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
+| NeoGeo (MVS / AES / CD) | 27 | [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer) |
 
 ## How to Test
 
@@ -59,7 +60,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│  FPGA Core (NES / SNES / Genesis / SMS / GB / N64 / PSX) │
+│  FPGA Core (NES / SNES / Genesis / SMS / GB / N64 / PSX / NeoGeo) │
 │  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
 │  every VBlank (~60 Hz)                                │
 └──────────────────────┬────────────────────────────────┘
@@ -157,6 +158,16 @@ Key differences from other cores:
 Same request/response protocol. The FPGA reads requested addresses from SDRAM via a dedicated channel (CH4):
 - **Main RAM** ($000000–$1FFFFF) — 2 MB
 
+#### NeoGeo (MVS / AES / CD) — Selective Address (`ra_ram_mirror_neogeo.sv`)
+Uses the selective address protocol. The FPGA reads from dual-ported 68K Work RAM BRAMs (WRAML + WRAMU, 8-bit each):
+- **68K Work RAM** ($00000–$0FFFF) — 64 KB
+
+The NeoGeo core stores 68K Work RAM in two separate 15-bit DPRAMs — WRAML (low byte, `M68K_DATA[7:0]`) and WRAMU (high byte, `M68K_DATA[15:8]`). The RA mirror reads Port B of both BRAMs using the byte address: even addresses (`addr[0]=0`) select WRAMU and odd addresses (`addr[0]=1`) select WRAML, following the 68K big-endian convention. No address inversion or byte reordering is needed.
+
+In **CD mode**, the WRAML/WRAMU BRAMs are repurposed for Z80 RAM and the 68K Work RAM lives in SDRAM. To keep RA working, shadow DPRAMs capture both CPU writes (via `~nWWL`/`~nWWU`) and DMA writes (targeting `$100000–$10FFFF`). The RA mirror automatically muxes between the MVS BRAMs and the CD shadow BRAMs depending on the active system mode.
+
+A custom DDRAM arbiter (`ddram_arb_neogeo.sv`) sits between the existing DDRAM controller (ADPCM samples / Z80 ROM reads) and the physical DDRAM interface, letting the RA mirror steal bus cycles when the primary master is idle. Two-stage flip-flop synchronizers handle clock domain crossing between CLK_48M (RA mirror) and CLK_96M (DDRAM).
+
 ### `AddAddress` Support — Pointer Resolution
 
 Several achievement conditions use the `AddAddress` operator, which reads a pointer from memory and adds its value to a base address to obtain the actual memory location to evaluate. In the Selective Address protocol, this creates a bootstrapping problem: on first collection, all cached values are zero, so `AddAddress` conditions compute `base + 0` and only request the pointer address itself — the real target address cannot be known until the pointer's actual value is available.
@@ -175,6 +186,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | Core | Re-collection interval | Re-resolves on change? |
 |------|------------------------|------------------------|
 | SNES | every ~5 min (~18 000 frames) | No |
+| NeoGeo | every ~5 min (~18 000 frames) | No |
 | PSX | every ~10 s (~600 frames) | Yes (1 pass) |
 | N64 | every ~10 s (~600 frames) | Yes (up to 4 passes) |
 
@@ -188,6 +200,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | Gameboy / GBC | MD5 of the raw ROM file (no header skipping needed) |
 | N64 | `rc_hash_generate_from_file()` from rcheevos — handles `.z64`, `.n64`, and `.v64` byte orders natively |
 | PSX | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, and `.iso` disc images natively |
+| NeoGeo | `rc_hash_generate_from_file()` from rcheevos — handles filename-based hashing for arcade ROM sets natively |
 
 ### How It Works
 
@@ -216,6 +229,7 @@ Currently achievements run in **softcore mode** (savestates allowed). Hardcore m
    - **Gameboy / Gameboy Color**: [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer)
    - **N64**: [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer)
    - **PSX**: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
+   - **NeoGeo (MVS / AES / CD)**: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
 5. Reboot your MiSTer, load the core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
 6. (Optional) Place an `achievement.wav` file in `/media/fat/` to hear a sound effect on unlock.
 
@@ -246,5 +260,6 @@ The Makefile automatically detects the rcheevos library and enables it if presen
 - Modified Gameboy core: [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer)
 - Modified N64 core: [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer)
 - Modified PSX core: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
+- Modified NeoGeo core: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
 - RetroAchievements: [retroachievements.org](https://retroachievements.org/)
 - rcheevos library: [RetroAchievements/rcheevos](https://github.com/RetroAchievements/rcheevos)
