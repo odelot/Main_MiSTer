@@ -172,6 +172,11 @@ static int g_n64_optionc = 0;
 static int g_n64_collecting = 0;
 static int g_n64_cache_ready = 0;
 static int g_n64_needs_recollect = 0;
+static int g_n64_resolve_pass = 0;
+static int g_n64_resolve_cooldown = 0;
+static void *g_n64_rdram_direct = NULL;
+static uint8_t *g_n64_progress_buf = NULL;
+static size_t   g_n64_progress_size = 0;
 static uint32_t g_n64_last_resp_frame = 0;
 static uint32_t g_n64_game_frames = 0;
 static uint32_t g_n64_poll_logged = 0;
@@ -778,42 +783,52 @@ static uint32_t ra_read_memory(uint32_t address, uint8_t *buffer,
 			}
 			memset(buffer, 0, num_bytes);
 			return num_bytes;
-		case 2: // RC_CONSOLE_NINTENDO_64 (N64)
-			// N64 rcheevos addresses are big-endian; RDRAM in DDR3 is
-			// little-endian within 32-bit words.  XOR 3 on the low 2 bits
-			// converts between the two byte orders.
-			if (g_n64_optionc) {
-				if (g_n64_collecting) {
-					for (uint32_t i = 0; i < num_bytes; i++)
-						ra_snes_addrlist_add(((address + i) ^ 3));
-				}
-				if (g_n64_cache_ready) {
-					for (uint32_t i = 0; i < num_bytes; i++)
-						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, ((address + i) ^ 3));
+			case 2: // RC_CONSOLE_NINTENDO_64 (N64)
+				// N64 rcheevos addresses are big-endian; RDRAM in DDR3 is
+				// little-endian within 32-bit words.  XOR 3 on the low 2 bits
+				// converts between the two byte orders.
+				if (g_n64_optionc) {
+					if (g_n64_collecting) {
+						for (uint32_t i = 0; i < num_bytes; i++)
+							ra_snes_addrlist_add(((address + i) ^ 3));
+					}
+					// Always prefer direct RDRAM reads for consistency
+					// (avoids mixing stale FPGA cache with live RDRAM values)
+					if (g_n64_rdram_direct) {
+						const uint8_t *rdram = (const uint8_t *)g_n64_rdram_direct;
+						for (uint32_t i = 0; i < num_bytes; i++) {
+							uint32_t ddr_addr = (address + i) ^ 3;
+							buffer[i] = (ddr_addr < 0x800000) ? rdram[ddr_addr] : 0;
+						}
+						return num_bytes;
+					}
+					if (g_n64_cache_ready) {
+						for (uint32_t i = 0; i < num_bytes; i++)
+							buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, ((address + i) ^ 3));
+						return num_bytes;
+					}
+					memset(buffer, 0, num_bytes);
 					return num_bytes;
 				}
 				memset(buffer, 0, num_bytes);
 				return num_bytes;
-			}
-			memset(buffer, 0, num_bytes);
-			return num_bytes;
-		case 11: // RC_CONSOLE_MASTER_SYSTEM
-		case 15: // RC_CONSOLE_GAME_GEAR
-			if (g_sms_optionc) {
-				if (g_sms_collecting) {
-					for (uint32_t i = 0; i < num_bytes; i++)
-						ra_snes_addrlist_add(address + i);
-				}
-				if (g_sms_cache_ready) {
-					for (uint32_t i = 0; i < num_bytes; i++)
-						buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
+			case 11: // RC_CONSOLE_MASTER_SYSTEM
+			case 15: // RC_CONSOLE_GAME_GEAR
+				if (g_sms_optionc) {
+					if (g_sms_collecting) {
+						for (uint32_t i = 0; i < num_bytes; i++)
+							ra_snes_addrlist_add(address + i);
+					}
+					if (g_sms_cache_ready) {
+						for (uint32_t i = 0; i < num_bytes; i++)
+							buffer[i] = ra_snes_addrlist_read_cached(g_ra_map, address + i);
+						return num_bytes;
+					}
+					memset(buffer, 0, num_bytes);
 					return num_bytes;
 				}
 				memset(buffer, 0, num_bytes);
 				return num_bytes;
-			}
-			memset(buffer, 0, num_bytes);
-			return num_bytes;
 		case 5:  // RC_CONSOLE_GAMEBOY_ADVANCE
 			if (g_gba_optionc) {
 				if (g_gba_collecting) {
@@ -1211,7 +1226,7 @@ void achievements_init(void)
 	signal(SIGFPE,  ra_crash_handler);
 
 	RA_LOG("=== RetroAchievements for MiSTer ===");
-	RA_LOG("Build: OptionC v21-n64xor3arm (2026-04-14)");
+	RA_LOG("Build: OptionC v28-b4 (2026-04-18)");
 	RA_LOG("Phase 3 — Full pipeline: HTTP + login + achievements");
 
 	const char *core = user_io_get_core_name(1);
@@ -1387,6 +1402,11 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 	g_n64_collecting = 0;
 	g_n64_cache_ready = 0;
 	g_n64_needs_recollect = 0;
+	g_n64_resolve_pass = 0;
+	g_n64_resolve_cooldown = 0;
+	if (g_n64_rdram_direct) { shmem_unmap(g_n64_rdram_direct, 0x800000); g_n64_rdram_direct = NULL; }
+	if (g_n64_progress_buf) { free(g_n64_progress_buf); g_n64_progress_buf = NULL; }
+	g_n64_progress_size = 0;
 	g_n64_last_resp_frame = 0;
 	g_n64_game_frames = 0;
 	g_n64_poll_logged = 0;
@@ -2016,15 +2036,36 @@ void achievements_poll(void)
 	// N64: Option C — selective address reading
 	// ================================================================
 	if (g_client && g_game_loaded && ra_get_console_id() == 2 && g_n64_optionc) {
+		// Ensure direct RDRAM mapping is available for fallback reads
+		if (!g_n64_rdram_direct) {
+			g_n64_rdram_direct = shmem_map(0x30000000, 0x800000);
+			if (g_n64_rdram_direct)
+				RA_LOG("N64 OptionC: Direct RDRAM mapped for fallback reads");
+			else
+				RA_LOG("N64 OptionC: WARNING - failed to map RDRAM for fallback!");
+		}
 		if (ra_snes_addrlist_count() == 0 && !g_n64_cache_ready) {
 			// Phase 1: Bootstrap — collect addresses with zero values
+			// Save rcheevos state before collection to prevent delta corruption
+			size_t psize = rc_client_progress_size(g_client);
+			if (psize > g_n64_progress_size) {
+				free(g_n64_progress_buf);
+				g_n64_progress_buf = (uint8_t *)malloc(psize);
+				g_n64_progress_size = psize;
+			}
+			if (g_n64_progress_buf)
+				rc_client_serialize_progress_sized(g_client, g_n64_progress_buf, g_n64_progress_size);
 			g_n64_collecting = 1;
 			ra_snes_addrlist_begin_collect();
 			rc_client_do_frame(g_client);
 			g_n64_collecting = 0;
+			// Restore state (undo delta/hit changes from zero-value reads)
+			if (g_n64_progress_buf)
+				rc_client_deserialize_progress_sized(g_client, g_n64_progress_buf, g_n64_progress_size);
 			int changed = ra_snes_addrlist_end_collect(g_ra_map);
 			if (changed) {
 				g_n64_needs_recollect = 1; // schedule pointer-resolution pass
+				g_n64_resolve_pass = 0;
 				RA_LOG("N64 OptionC: Bootstrap collection done, %d addrs written to DDRAM",
 					ra_snes_addrlist_count());
 			} else {
@@ -2034,30 +2075,52 @@ void achievements_poll(void)
 			// Phase 2/4: Wait for FPGA cache
 			if (ra_snes_addrlist_is_ready(g_ra_map)) {
 				g_n64_cache_ready = 1;
-				g_n64_last_resp_frame = 0;
-				g_n64_game_frames = 0;
-				g_n64_poll_logged = 0;
-				clock_gettime(CLOCK_MONOTONIC, &g_n64_cache_time);
 				if (g_n64_needs_recollect) {
 					RA_LOG("N64 OptionC: Cache active (pre-recollect). Will resolve pointers.");
 				} else {
-					RA_LOG("N64 OptionC: Cache active! FPGA response matched request.");
+					if (g_n64_game_frames == 0) {
+						// First activation after bootstrap
+						g_n64_last_resp_frame = 0;
+						g_n64_poll_logged = 0;
+						clock_gettime(CLOCK_MONOTONIC, &g_n64_cache_time);
+						RA_LOG("N64 OptionC: Cache active! FPGA response matched request.");
+					} else {
+						RA_LOG("N64 OptionC: Resolution complete, resuming (%d addrs)",
+							ra_snes_addrlist_count());
+					}
+					// Restore rcheevos state saved before resolution began
+					if (g_n64_progress_buf)
+						rc_client_deserialize_progress_sized(g_client, g_n64_progress_buf, g_n64_progress_size);
+					g_n64_resolve_cooldown = 30;
+					RA_LOG("N64 OptionC: State restored via Phase 2, cooldown=30");
 				}
 			}
 		} else if (g_n64_needs_recollect) {
-			// Phase 3: Pointer-resolution re-collection
-			g_n64_needs_recollect = 0;
+			// Phase 3: Iterative pointer-resolution (multi-pass for AddAddress chains)
+			g_n64_resolve_pass++;
 			g_n64_collecting = 1;
 			ra_snes_addrlist_begin_collect();
 			rc_client_do_frame(g_client);
 			g_n64_collecting = 0;
 			int changed = ra_snes_addrlist_end_collect(g_ra_map);
-			if (changed) {
-				RA_LOG("N64 OptionC: Pointer-resolve re-collection done, %d addrs (was different!)",
-					ra_snes_addrlist_count());
-				g_n64_cache_ready = 0; // wait for new FPGA data with correct addresses
+			if (changed && g_n64_resolve_pass < 4) {
+				RA_LOG("N64 OptionC: Pass %d found new addrs, %d total - re-resolving",
+					g_n64_resolve_pass, ra_snes_addrlist_count());
+				g_n64_cache_ready = 0; // wait for FPGA to respond with new addresses
 			} else {
-				RA_LOG("N64 OptionC: Pointer-resolve complete, no address changes");
+				RA_LOG("N64 OptionC: Pointer-resolution %s after %d passes, %d addrs",
+					changed ? "done (max passes)" : "stable",
+					g_n64_resolve_pass, ra_snes_addrlist_count());
+				g_n64_needs_recollect = 0;
+				if (changed) {
+					g_n64_cache_ready = 0; // need final FPGA response (Phase 2 will deserialize)
+				} else {
+					// Stable: restore state directly since Phase 2 is skipped (cache_ready stays 1)
+					if (g_n64_progress_buf)
+						rc_client_deserialize_progress_sized(g_client, g_n64_progress_buf, g_n64_progress_size);
+					g_n64_resolve_cooldown = 30;
+					RA_LOG("N64 OptionC: State restored after stable resolution, cooldown=30");
+				}
 			}
 		} else {
 			// Phase 5: Normal frame processing
@@ -2141,25 +2204,39 @@ void achievements_poll(void)
 					}
 				}
 
-				// Re-collect every 600 frames (~10s) to track pointer changes
-				int re_collect = (g_n64_game_frames % 600 == 0) && (g_n64_game_frames > 0);
-				if (re_collect) {
-					RA_LOG("N64 OptionC: Re-collect starting at game_frame=%u",
-						g_n64_game_frames);
+				if (g_n64_resolve_cooldown > 0) {
+					// Cooldown: evaluate normally without collection to avoid oscillation
+					g_n64_resolve_cooldown--;
+					rc_client_do_frame(g_client);
+				} else {
+					// Per-frame collection: detect pointer changes
+					// Pre-serialize state (in case pointer change corrupts evaluation)
+					{
+						size_t psize = rc_client_progress_size(g_client);
+						if (psize > g_n64_progress_size) {
+							free(g_n64_progress_buf);
+							g_n64_progress_buf = (uint8_t *)malloc(psize);
+							g_n64_progress_size = psize;
+						}
+						if (g_n64_progress_buf)
+							rc_client_serialize_progress_sized(g_client, g_n64_progress_buf, g_n64_progress_size);
+					}
+
+					// Combined collection + evaluation
 					g_n64_collecting = 1;
 					ra_snes_addrlist_begin_collect();
-				}
-
-				rc_client_do_frame(g_client);
-
-				if (re_collect) {
+					rc_client_do_frame(g_client);
 					g_n64_collecting = 0;
+
 					if (ra_snes_addrlist_end_collect(g_ra_map)) {
-						RA_LOG("N64 OptionC: Address list refreshed, %d addrs",
-							ra_snes_addrlist_count());
-						g_n64_cache_ready = 0; // wait for new FPGA data
-					} else {
-						RA_LOG("N64 OptionC: Re-collect done, no address changes");
+						// Pointer change: evaluation used stale data, roll back
+						if (g_n64_progress_buf)
+							rc_client_deserialize_progress_sized(g_client, g_n64_progress_buf, g_n64_progress_size);
+						RA_LOG("N64 OptionC: Pointer change detected at game_frame=%u, %d addrs",
+							g_n64_game_frames, ra_snes_addrlist_count());
+						g_n64_cache_ready = 0;
+						g_n64_needs_recollect = 1;
+						g_n64_resolve_pass = 0;
 					}
 				}
 			}
