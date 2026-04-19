@@ -26,17 +26,11 @@ static console_state_t g_md_state = {};
 static void genesis_init(void)
 {
 	memset(&g_md_state, 0, sizeof(g_md_state));
-	ra_snes_addrlist_init();
 }
 
 static void genesis_reset(void)
 {
-	g_md_state.optionc = 0;
-	g_md_state.collecting = 0;
-	g_md_state.cache_ready = 0;
-	g_md_state.last_resp_frame = 0;
-	g_md_state.game_frames = 0;
-	g_md_state.poll_logged = 0;
+	memset(&g_md_state, 0, sizeof(g_md_state));
 }
 
 static uint32_t genesis_read_memory(void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes)
@@ -57,66 +51,68 @@ static uint32_t genesis_read_memory(void *map, uint32_t address, uint8_t *buffer
 	return 0;
 }
 
-static void genesis_poll(void *map, void *client, int game_loaded)
+static int genesis_poll(void *map, void *client, int game_loaded)
 {
 #ifdef HAS_RCHEEVOS
-	if (!client || !game_loaded || !map || !g_md_state.optionc) return;
-	
+	if (!client || !game_loaded || !map || !g_md_state.optionc) return 0;
+
 	rc_client_t *rc_client = (rc_client_t *)client;
 
 	if (ra_snes_addrlist_count() == 0 && !g_md_state.cache_ready) {
-		// Bootstrap collection
+		// Bootstrap: run one do_frame with zeros to discover needed addresses
 		g_md_state.collecting = 1;
 		ra_snes_addrlist_begin_collect();
 		rc_client_do_frame(rc_client);
 		g_md_state.collecting = 0;
 		int changed = ra_snes_addrlist_end_collect(map);
 		if (changed) {
-			ra_log_write("Genesis OptionC: Bootstrap collection done, %d addrs\n",
+			ra_log_write("MD OptionC: Bootstrap collection done, %d addrs written to DDRAM\n",
 				ra_snes_addrlist_count());
+		} else {
+			ra_log_write("MD OptionC: No addresses collected\n");
 		}
 	} else if (!g_md_state.cache_ready) {
-		// Wait for cache
+		// Wait for FPGA to respond with cached values
 		if (ra_snes_addrlist_is_ready(map)) {
 			g_md_state.cache_ready = 1;
 			g_md_state.last_resp_frame = 0;
 			g_md_state.game_frames = 0;
 			g_md_state.poll_logged = 0;
 			clock_gettime(CLOCK_MONOTONIC, &g_md_state.cache_time);
-			ra_log_write("Genesis OptionC: Cache active!\n");
+			ra_log_write("MD OptionC: Cache active! FPGA response matched request.\n");
+			// Dump address list once on activation
+			const uint32_t *a0 = ra_snes_addrlist_addrs();
+			int ac = ra_snes_addrlist_count();
+			int ad = ac < 20 ? ac : 20;
+			char ah[256]; int ap = 0;
+			for (int i = 0; i < ad && ap < (int)sizeof(ah) - 8; i++)
+				ap += snprintf(ah + ap, sizeof(ah) - ap, "%04X ", a0[i]);
+			ra_log_write("MD ADDRLIST[0..%d]: %s (total=%d)\n", ad - 1, ah, ac);
 		}
 	} else {
-		// Normal frame processing
+		// Normal frame processing from cache
 		uint32_t resp_frame = ra_snes_addrlist_response_frame(map);
 		if (resp_frame > g_md_state.last_resp_frame) {
 			g_md_state.last_resp_frame = resp_frame;
 			g_md_state.game_frames++;
+			ra_frame_processed(resp_frame);
 
-			// Dump first 5 frames with Sonic 1 addresses
+			// Early-frame valcache dump (first 5 frames)
 			if (g_md_state.game_frames <= 5) {
-				const uint8_t *vals = (const uint8_t *)map + 0x48000 + 8;
-				int cnt = ra_snes_addrlist_count();
-				int dump_len = cnt < 32 ? cnt : 32;
-				int non_zero = 0;
-				char hex[256];
-				int pos = 0;
-				for (int i = 0; i < dump_len && pos < (int)sizeof(hex) - 4; i++) {
-					pos += snprintf(hex + pos, sizeof(hex) - pos, "%02X ", vals[i]);
-					if (vals[i]) non_zero++;
+				const uint8_t *ev = (const uint8_t *)map + 0x48000 + 8;
+				int ec = ra_snes_addrlist_count();
+				int ed = ec < 45 ? ec : 45;
+				int enz = 0;
+				char eh[256]; int ep = 0;
+				for (int i = 0; i < ed && ep < (int)sizeof(eh) - 4; i++) {
+					ep += snprintf(eh + ep, sizeof(eh) - ep, "%02X ", ev[i]);
+					if (ev[i]) enz++;
 				}
-				ra_log_write("Genesis Frame %u: VALCACHE[0..%d]: %s (%d non-zero)\n", 
-					g_md_state.game_frames, dump_len - 1, hex, non_zero);
-				
-				// Sonic 1 key addresses
-				uint8_t gs   = ra_snes_addrlist_read_cached(map, 0xF601);
-				uint8_t act  = ra_snes_addrlist_read_cached(map, 0xFE10);
-				uint8_t zone = ra_snes_addrlist_read_cached(map, 0xFE11);
-				uint8_t lives= ra_snes_addrlist_read_cached(map, 0xFE13);
-				ra_log_write("  Sonic1: state=%02X act=%02X zone=%02X lives=%02X\n",
-					gs, act, zone, lives);
+				ra_log_write("MD early[%u]: VALCACHE %s (%d nz)\n",
+					g_md_state.game_frames, eh, enz);
 			}
 
-			// Re-collect every ~5 min
+			// Re-collect every ~5 min to catch address changes
 			int re_collect = (g_md_state.game_frames % 18000 == 0) && (g_md_state.game_frames > 0);
 			if (re_collect) {
 				g_md_state.collecting = 1;
@@ -128,7 +124,7 @@ static void genesis_poll(void *map, void *client, int game_loaded)
 			if (re_collect) {
 				g_md_state.collecting = 0;
 				if (ra_snes_addrlist_end_collect(map)) {
-					ra_log_write("Genesis OptionC: Address list refreshed, %d addrs\n",
+					ra_log_write("MD OptionC: Address list refreshed, %d addrs\n",
 						ra_snes_addrlist_count());
 				}
 			}
@@ -143,10 +139,16 @@ static void genesis_poll(void *map, void *client, int game_loaded)
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		double elapsed = (now.tv_sec - g_md_state.cache_time.tv_sec)
 			+ (now.tv_nsec - g_md_state.cache_time.tv_nsec) / 1e9;
-		ra_log_write("POLL(Genesis): resp_frame=%u game_frames=%u elapsed=%.1fs addrs=%d\n",
-			g_md_state.last_resp_frame, g_md_state.game_frames, elapsed,
+		double ms_per_cycle = (g_md_state.game_frames > 0) ?
+			(elapsed * 1000.0 / g_md_state.game_frames) : 0.0;
+		ra_log_write("POLL(MD): resp_frame=%u game_frames=%u elapsed=%.1fs ms/cycle=%.1f addrs=%d\n",
+			g_md_state.last_resp_frame, g_md_state.game_frames, elapsed, ms_per_cycle,
 			ra_snes_addrlist_count());
 	}
+
+	return 1; // MegaDrive handled
+#else
+	return 0;
 #endif
 }
 
@@ -154,32 +156,22 @@ static int genesis_calculate_hash(const char *rom_path, char *md5_hex_out)
 {
 	(void)rom_path;
 	(void)md5_hex_out;
-	// Genesis uses standard MD5
-	return 0; // Let main code handle it
+	return 0; // use default MD5
 }
 
 static void genesis_set_hardcore(int enabled)
 {
-	if (enabled) {
-		user_io_status_set("[64]", 1);  // Disable cheats
-		user_io_status_set("[24]", 1);  // Disable save states
-		ra_log_write("Genesis: Hardcore mode enabled\n");
-	} else {
-		user_io_status_set("[64]", 0);
-		user_io_status_set("[24]", 0);
-		ra_log_write("Genesis: Hardcore mode disabled\n");
-	}
+	user_io_status_set("[64]", enabled ? 1 : 0); // disable cheats
+	user_io_status_set("[24]", enabled ? 1 : 0); // disable save states
+	ra_log_write("Genesis: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
-// Called from main achievements code to detect protocol
-void genesis_detect_protocol(void *map)
+static void genesis_detect_protocol(void *map)
 {
-	if (!map) return;
-	const ra_header_t *hdr = (const ra_header_t *)map;
-	if (hdr->region_count == 0) {
-		g_md_state.optionc = 1;
-		ra_log_write("Genesis FPGA protocol: Option C\n");
-	}
+	(void)map;
+	// Genesis always uses Option C (no VBlank-gated mode)
+	g_md_state.optionc = 1;
+	ra_log_write("MegaDrive FPGA protocol: Option C (selective address reading)\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +185,7 @@ const console_handler_t g_console_genesis = {
 	.poll = genesis_poll,
 	.calculate_hash = genesis_calculate_hash,
 	.set_hardcore = genesis_set_hardcore,
+	.detect_protocol = genesis_detect_protocol,
 	.console_id = 1,  // RC_CONSOLE_MEGA_DRIVE
 	.name = "Genesis"
 };

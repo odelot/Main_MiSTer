@@ -2727,6 +2727,7 @@ void HandleUI(void)
 			{
 				neocd_set_en(1);
 				neocd_set_image(selPath);
+				achievements_load_game(selPath, 0);
 			}
 			else if (is_atari800())
 			{
