@@ -14,6 +14,8 @@ extern const console_handler_t g_console_gameboy;
 extern const console_handler_t g_console_sms;
 extern const console_handler_t g_console_neogeo;
 extern const console_handler_t g_console_gba;
+extern const console_handler_t g_console_megacd;
+extern const console_handler_t g_console_atari2600;
 
 // Master lookup table
 static const console_handler_t *g_console_handlers[] = {
@@ -26,6 +28,8 @@ static const console_handler_t *g_console_handlers[] = {
 	&g_console_sms,
 	&g_console_neogeo,
 	&g_console_gba,
+	&g_console_megacd,
+	&g_console_atari2600,
 	NULL
 };
 

@@ -1142,8 +1142,10 @@ void achievements_poll(void)
 	}
 
 	// Frame delta check (detect missed frames)
+	// Only log if delta is in a plausible range (≤1000 missed frames),
+	// to avoid spam when the counter is garbage/oscillating.
 	uint32_t delta = frame - g_last_frame;
-	if (delta > 1 && g_last_frame > 0) {
+	if (delta > 1 && g_last_frame > 0 && delta <= 1000) {
 		RA_LOG("WARNING: Missed %u frames (last=%u, now=%u)", delta - 1, g_last_frame, frame);
 	}
 

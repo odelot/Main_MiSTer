@@ -64,6 +64,9 @@ typedef struct __attribute__((packed)) {
 #define RA_NES_CPURAM_REGION  0  // $0000-$07FF (2KB)
 #define RA_NES_CARTRAM_REGION 1  // $6000-$7FFF (up to 8KB+)
 
+// Atari 2600-specific region indices
+#define RA_ATARI2600_RIOT_REGION 0  // $0080-$00FF RIOT internal RAM (128 bytes)
+
 // SNES-specific layout (fixed offsets in DDRAM mirror)
 #define RA_SNES_WRAM_OFFSET   0x00100   // WRAM data starts at byte offset 0x100
 #define RA_SNES_WRAM_SIZE     0x20000   // 128KB
@@ -169,6 +172,11 @@ uint32_t ra_ramread_nes_read(const void *map, uint32_t address, uint8_t *buffer,
 //   0x000000-0x01FFFF = WRAM (128KB)
 //   0x020000+         = Save RAM (BSRAM)
 uint32_t ra_ramread_snes_read(const void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes);
+
+// Read Atari 2600 memory from mirrored RAM. rcheevos address map:
+//   0x0080-0x00FF: RIOT internal RAM (128 bytes)
+uint8_t  ra_ramread_atari2600_byte(const void *map, uint16_t addr);
+uint32_t ra_ramread_atari2600_read(const void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes);
 
 // Option C: Selective address reading (SNES)
 // ARM collects needed addresses from rcheevos, writes list to DDRAM.

@@ -2698,6 +2698,8 @@ void HandleUI(void)
 			else if (is_megacd())
 			{
 				mcd_set_image(ioctl_index, selPath);
+				if (!ioctl_index)
+					achievements_load_game(selPath, 0);
 			}
 			else if (is_pce())
 			{

@@ -37,21 +37,26 @@ static void neogeo_reset(void)
 	g_neogeo_is_cd = 0;
 }
 
+
 static uint32_t neogeo_read_memory(void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes)
 {
 	if (g_neogeo_state.optionc) {
 		if (g_neogeo_state.collecting) {
 			for (uint32_t i = 0; i < num_bytes; i++) {
-				// NeoGeoCD: natural 68K big-endian order, no XOR needed.
-				// NeoGeo MVS (fbneo): 16-bit words in host little-endian order, XOR addr bit 0.
-				uint32_t a = g_neogeo_is_cd ? (address + i) : ((address + i) ^ 1);
-				ra_snes_addrlist_add(a);
+				// MVS (FBNeo): XOR^1 to match FBNeo byte-swap convention.
+				// NeoGeoCD shadow RAM is sampled in native 68K byte order.
+				// Both MVS and CD use BIGENDIAN XOR (neocd_libretro sets RETRO_MEMDESC_BIGENDIAN;
+				// P1 shadow is in native 68K order, same convention as MVS WRAMU/WRAML).
+				uint32_t a = (address + i);
+                                if (!g_neogeo_is_cd) a ^= 1;
+                                ra_snes_addrlist_add(a);
 			}
 		}
 		if (g_neogeo_state.cache_ready) {
 			for (uint32_t i = 0; i < num_bytes; i++) {
-				uint32_t a = g_neogeo_is_cd ? (address + i) : ((address + i) ^ 1);
-				buffer[i] = ra_snes_addrlist_read_cached(map, a);
+				uint32_t a = (address + i);
+                                if (!g_neogeo_is_cd) a ^= 1;
+                                buffer[i] = ra_snes_addrlist_read_cached(map, a);
 			}
 			return num_bytes;
 		}
@@ -168,6 +173,45 @@ static int neogeo_poll(void *map, void *client, int game_loaded)
 			g_neogeo_is_cd ? "CD" : "",
 			g_neogeo_state.last_resp_frame, g_neogeo_state.game_frames, elapsed, ms_per_cycle,
 			ra_snes_addrlist_count());
+
+		// KEY VALS diagnostic
+		{
+			static const uint32_t key_ra[] = {
+				0x0320,0x0321,0x0322,0x0323,
+				0x6EF0,0x6EF1,0x6EF2,0x6EF3,0x6EF4,0x6EF5,0x6EF6,0x6EF7,
+				0xFD88,0xFD89,0xFD8A,0xFD8B,0xFD8C,0xFD8D,0xFD8E,0xFD8F,
+				0xFDB6,0xFDB7,0x700F,0x7011
+			};
+			static const char *key_n[] = {
+				"320","321","322","323",
+				"ef0","ef1","ef2","ef3","ef4","ef5","ef6","ef7",
+				"d88","d89","d8a","d8b","d8c","d8d","d8e","d8f",
+				"db6","db7","70f","711"
+			};
+			char kvbuf[900]; int kvp = 0;
+			for (int ki = 0; ki < 24; ki++) {
+				uint32_t phys = key_ra[ki];
+				if (!g_neogeo_is_cd) phys ^= 1;
+				uint8_t kv = ra_snes_addrlist_read_cached(map, phys);
+				kvp += snprintf(kvbuf + kvp, sizeof(kvbuf) - kvp,
+					" %s(%04X)=%02X", key_n[ki], phys, kv);
+			}
+			ra_log_write("CD KEY VALS:%s\n", kvbuf);
+		}
+		// ADDRLIST + VALCACHE dump
+		{
+			int nac = ra_snes_addrlist_count();
+			const uint32_t *naa = ra_snes_addrlist_addrs();
+			char nabuf[512]; int nap = 0;
+			char nvbuf[512]; int nvp = 0;
+			for (int i = 0; i < nac && i < 48 && nap < 490 && nvp < 490; i++) {
+				uint8_t v = ra_snes_addrlist_read_cached(map, naa[i]);
+				nap += snprintf(nabuf + nap, sizeof(nabuf) - nap, "%04X ", naa[i]);
+				nvp += snprintf(nvbuf + nvp, sizeof(nvbuf) - nvp, "%02X ", v);
+			}
+			ra_log_write("CD ADDRLIST: %s\n", nabuf);
+			ra_log_write("CD VALCACHE: %s\n", nvbuf);
+		}
 	}
 
 	return 1; // NeoGeo handled
