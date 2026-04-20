@@ -17,6 +17,7 @@ extern const console_handler_t g_console_gba;
 extern const console_handler_t g_console_megacd;
 extern const console_handler_t g_console_atari2600;
 extern const console_handler_t g_console_tgfx16;
+extern const console_handler_t g_console_s32x;
 
 // Master lookup table
 static const console_handler_t *g_console_handlers[] = {
@@ -32,6 +33,7 @@ static const console_handler_t *g_console_handlers[] = {
 	&g_console_megacd,
 	&g_console_atari2600,
 	&g_console_tgfx16,
+	&g_console_s32x,
 	NULL
 };
 
@@ -52,6 +54,9 @@ const console_handler_t *get_console_handler_by_name(const char *core_name)
 	}
 	if (!strcasecmp(core_name, "GBC")) {
 		return &g_console_gameboy;  // GameBoy handler handles both GB and GBC
+	}
+	if (!strcasecmp(core_name, "MegaDrive32X")) {
+		return &g_console_s32x;
 	}
 
 	return NULL;

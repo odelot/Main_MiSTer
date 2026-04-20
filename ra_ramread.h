@@ -178,6 +178,9 @@ uint32_t ra_ramread_snes_read(const void *map, uint32_t address, uint8_t *buffer
 uint8_t  ra_ramread_atari2600_byte(const void *map, uint16_t addr);
 uint32_t ra_ramread_atari2600_read(const void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes);
 
+uint8_t  ra_ramread_atari7800_byte(const void *map, uint16_t addr);
+uint32_t ra_ramread_atari7800_read(const void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes);
+
 // Option C: Selective address reading (SNES)
 // ARM collects needed addresses from rcheevos, writes list to DDRAM.
 // FPGA reads only those addresses each VBlank. ARM reads cached values.
