@@ -148,21 +148,20 @@ uint32_t ra_ramread_snes_read(const void *map, uint32_t address, uint8_t *buffer
 
 uint8_t ra_ramread_atari2600_byte(const void *map, uint16_t addr)
 {
-	// Atari 2600 RIOT RAM: 128 bytes at CPU $0080-$00FF.
-	// rcheevos addresses this range as $0080-$00FF (and mirrors).
-	// We map any address with bit 7 set (and bit 9 clear) to region 0.
-	if ((addr & 0x0080) && !(addr & 0x0200)) {
-		uint8_t offset = addr & 0x007F;  // 0-127
+	// rcheevos maps Atari 2600 RIOT RAM as a 128-byte block starting at address 0.
+	// This matches Stella2014's retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM) which
+	// returns a direct pointer to the 128-byte RIOT RAM — so rcheevos address 0x00
+	// = RIOT byte 0 = CPU $0080, and rcheevos address 0x4E = RIOT byte 0x4E = CPU $00CE.
+	// The old check (addr & 0x0080) was wrong: it rejected all addresses below 0x80.
+	if (addr < 128) {
 		if (!map) return 0;
 		const ra_header_t *hdr = (const ra_header_t *)map;
 		if (hdr->magic != RA_MAGIC) return 0;
 
 		// Bypass the region descriptor: ra_riot_mirror always writes RIOT data
-		// at a fixed DDRAM offset of 0x100 with size 128. The descriptor at
-		// offset 0x10 is sometimes stale (garbage from a previous core session),
-		// so we hardcode the layout here rather than trusting the descriptor.
+		// at a fixed DDRAM offset of 0x100 with size 128.
 		const uint8_t *data = (const uint8_t *)map + 0x100;
-		return data[offset];
+		return data[addr];
 	}
 	return 0;
 }

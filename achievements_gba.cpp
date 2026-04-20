@@ -3,6 +3,7 @@
 #include "achievements_console.h"
 #include "achievements.h"
 #include "ra_ramread.h"
+#include "shmem.h"
 #include "user_io.h"
 #include <string.h>
 #include <time.h>
@@ -48,20 +49,24 @@ static void gba_optionc_dump_valcache(const char *label, void *map)
         ra_log_write("GBA DUMP[%s] VALCACHE[0..%d]: %s\n", label, dump_len - 1, hex);
 
         // FPGA debug words at 0x10 / 0x18
+        // Word 1: {ver(8), dispatch(8), 0(16), timeout(16), ok(16)}
         const uint8_t *dbg8 = base + 0x10;
-        uint16_t iwram_cnt   = dbg8[0] | (dbg8[1] << 8);
+        uint16_t ok_cnt       = dbg8[0] | (dbg8[1] << 8);
+        uint16_t timeout_cnt  = dbg8[2] | (dbg8[3] << 8);
         uint8_t  dispatch_cnt = dbg8[6];
         uint8_t  fpga_ver     = dbg8[7];
+        // Word 2: {first_addr(16), iwram(16), ewram(16), cart(16)}
         const uint8_t *dbg8b = base + 0x18;
-        uint16_t ewram_cnt  = dbg8b[4] | (dbg8b[5] << 8);
-        uint16_t cart_cnt   = dbg8b[2] | (dbg8b[3] << 8);
+        uint16_t cart_cnt   = dbg8b[0] | (dbg8b[1] << 8);
+        uint16_t ewram_cnt  = dbg8b[2] | (dbg8b[3] << 8);
+        uint16_t iwram_cnt  = dbg8b[4] | (dbg8b[5] << 8);
         uint16_t first_addr = dbg8b[6] | (dbg8b[7] << 8);
 
-        ra_log_write("GBA DUMP[%s] FPGA ver=0x%02X dispatch=%u iwram=%u ewram=%u cart=%u faddr=0x%04X\n",
-                label, fpga_ver, dispatch_cnt, iwram_cnt, ewram_cnt, cart_cnt, first_addr);
+        ra_log_write("GBA DUMP[%s] FPGA ver=0x%02X dispatch=%u ok=%u timeout=%u iwram=%u ewram=%u cart=%u faddr=0x%04X\n",
+                label, fpga_ver, dispatch_cnt, ok_cnt, timeout_cnt, iwram_cnt, ewram_cnt, cart_cnt, first_addr);
 
-        // Address+value pairs (first 10)
-        int show = addr_count < 10 ? addr_count : 10;
+        // Address+value pairs (all addresses)
+        int show = addr_count;
         for (int i = 0; i < show; i++)
                 ra_log_write("GBA DUMP[%s]   [%d] addr=0x%05X val=0x%02X\n", label, i, addrs[i], vals[i]);
 }
@@ -214,11 +219,54 @@ static void gba_set_hardcore(int enabled)
         ra_log_write("GBA: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
+// ---------------------------------------------------------------------------
+// GBA Flash DDRAM initialization
+// ---------------------------------------------------------------------------
+// On real GBA, erased/unwritten Flash reads 0xFF.  The FPGA core does not
+// pre-fill the DDRAM Flash region, so when no save file is loaded the area
+// stays at 0x00 (DDR3 default).  RetroAchievements conditions that check for
+// "no save present" compare against 0xFF, so we must initialise it here.
+//
+// ARM physical address for Flash = 0x30000000 (FLASH_BASE_DWORD=0, qword*8)
+// Size = 128 KB (same as Softmap_GBA_FLASH_ADDR range in GBA.sv)
+
+#define GBA_FLASH_PHYS_ADDR  0x30000000
+#define GBA_FLASH_SIZE       0x20000   // 128 KB
+
+static void gba_init_flash_ddram(void)
+{
+        void *flash = shmem_map(GBA_FLASH_PHYS_ADDR, GBA_FLASH_SIZE);
+        if (!flash) {
+                ra_log_write("GBA Flash init: shmem_map(0x%08X) failed\n", GBA_FLASH_PHYS_ADDR);
+                return;
+        }
+
+        // Check if the region is all-zero (no save file was loaded).
+        // A loaded save file will have non-zero bytes (including 0xFF for
+        // erased sectors), so we only fill when the DDR3 default is intact.
+        const uint8_t *p = (const uint8_t *)flash;
+        int all_zero = 1;
+        for (uint32_t i = 0; i < GBA_FLASH_SIZE; i += 256) {
+                if (p[i] != 0x00) { all_zero = 0; break; }
+        }
+
+        if (all_zero) {
+                memset(flash, 0xFF, GBA_FLASH_SIZE);
+                ra_log_write("GBA Flash init: filled 128KB at 0x%08X with 0xFF (no save loaded)\n",
+                        GBA_FLASH_PHYS_ADDR);
+        } else {
+                ra_log_write("GBA Flash init: region not zero, save file present — skipped\n");
+        }
+
+        shmem_unmap(flash, GBA_FLASH_SIZE);
+}
+
 static void gba_detect_protocol(void *map)
 {
         if (!map) return;
         // GBA always uses Option C
         g_gba_state.optionc = 1;
+        gba_init_flash_ddram();
         ra_log_write("GBA FPGA protocol: Option C (selective address reading)\n");
 }
 
