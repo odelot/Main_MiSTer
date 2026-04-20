@@ -15,6 +15,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | Gameboy / Gameboy Color | 4 | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
 | N64 | 2 | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
 | PSX | 12 | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
+| GBA (Game Boy Advance) | 5 | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
 | Mega CD / Sega CD | 9 | [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer) |
 | NeoGeo (MVS / AES / CD) | 27 | [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer) |
 
@@ -64,7 +65,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│  FPGA Core (NES / SNES / Genesis / SMS / GB / N64 / PSX / NeoGeo) │
+│  FPGA Core (NES / SNES / Genesis / SMS / GB / GBA / N64 / PSX / MCD / NeoGeo) │
 │  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
 │  every VBlank (~60 Hz)                                │
 └──────────────────────┬────────────────────────────────┘
@@ -130,6 +131,16 @@ Due to the larger RAM space, the ARM binary writes the list of addresses it need
 Same request/response protocol. The FPGA reads requested addresses directly from the 68K Work RAM BRAM:
 - **68K Work RAM** ($000000–$00FFFF) — 64 KB
 - Includes hardware-accurate FC1004 address bit-13 inversion for correct BRAM mapping
+
+#### GBA (Game Boy Advance) — Selective Address (`ra_ram_mirror_gba.sv`)
+Same request/response protocol. The FPGA reads from three distinct memory backends:
+- **IWRAM** ($00000–$07FFF) — 32 KB (on-chip block RAM, Port B read with double-read collision detection)
+- **EWRAM** ($08000–$47FFF) — 256 KB (DDRAM, via `Softmap_GBA_WRam_ADDR`)
+- **Cart RAM / Flash** ($48000–$57FFF) — up to 64 KB (DDRAM, via `Softmap_GBA_FLASH_ADDR`)
+
+The GBA core's existing `ddram.sv` module was extended with a dedicated lowest-priority RA channel for both reads and writes. No separate arbiter file is needed — the RA port is integrated directly into the DDRAM controller. IWRAM reads use the BRAM Port B of `gba_memorymux`, with a read-verify-retry mechanism (up to 4 retries) to handle occasional collisions when the CPU writes on Port A at the same cycle.
+
+A unique GBA-specific feature: the ARM binary pre-fills the Flash DDRAM region (128 KB at 0x30000000) with `0xFF` on game load when no save file is present, since real GBA Flash reads `0xFF` when erased and many RA conditions check for this sentinel value. Total exposed: **352 KB**.
 
 #### Mega CD / Sega CD — Selective Address (`ra_ram_mirror_mcd.sv`)
 Same request/response protocol. The FPGA reads from SDRAM (not BRAM), handling two distinct memory regions:
@@ -198,6 +209,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 |------|------------------------|------------------------|
 | SNES | every ~5 min (~18 000 frames) | No |
 | Genesis | every ~5 min (~18 000 frames) | No |
+| GBA | every ~5 min (~18 000 frames) | No |
 | Mega CD | every ~5 min (~18 000 frames) | No |
 | NeoGeo | every ~5 min (~18 000 frames) | No |
 | PSX | every ~10 s (~600 frames) | Yes (1 pass) |
@@ -212,6 +224,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | Genesis | MD5 of the raw ROM file (no header skipping needed) |
 | Mega CD | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin` and `.chd` disc images natively |
 | Gameboy / GBC | MD5 of the raw ROM file (no header skipping needed) |
+| GBA | `rc_hash_generate_from_file()` from rcheevos — handles `.gba` ROM files natively |
 | N64 | `rc_hash_generate_from_file()` from rcheevos — handles `.z64`, `.n64`, and `.v64` byte orders natively |
 | PSX | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, and `.iso` disc images natively |
 | NeoGeo | `rc_hash_generate_from_file()` from rcheevos — handles filename-based hashing for arcade ROM sets natively |
@@ -243,6 +256,7 @@ Currently achievements run in **softcore mode** (savestates allowed). Hardcore m
    - **Gameboy / Gameboy Color**: [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer)
    - **N64**: [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer)
    - **PSX**: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
+   - **GBA**: [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer)
    - **Mega CD / Sega CD**: [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer)
    - **NeoGeo (MVS / AES / CD)**: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
 5. Reboot your MiSTer, load the core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
@@ -275,6 +289,7 @@ The Makefile automatically detects the rcheevos library and enables it if presen
 - Modified Gameboy core: [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer)
 - Modified N64 core: [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer)
 - Modified PSX core: [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer)
+- Modified GBA core: [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer)
 - Modified MegaCD core: [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer)
 - Modified NeoGeo core: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
 - RetroAchievements: [retroachievements.org](https://retroachievements.org/)
