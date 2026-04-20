@@ -697,6 +697,15 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 	case RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_UPDATE:
 		{
 			RA_LOG("PROGRESS: %s — %s", event->achievement->title, event->achievement->measured_progress);
+                        // Dump all cached values on progress events for debugging
+                        if (g_ra_map) {
+                                int cnt = ra_snes_addrlist_count();
+                                const uint32_t *addrs = ra_snes_addrlist_addrs();
+                                for (int i = 0; i < cnt; i++) {
+                                        uint8_t v = ra_snes_addrlist_read_cached(g_ra_map, addrs[i]);
+                                        RA_LOG("  COND[%d] addr=0x%05X val=0x%02X", i, addrs[i], v);
+                                }
+                        }
 			if (g_show_progress_popups &&
 			    !ra_progress_popup_suppressed(event->achievement->id, event->achievement->measured_progress)) {
 				char buf[NOTIF_TEXT_MAX];

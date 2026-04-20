@@ -16,6 +16,7 @@ extern const console_handler_t g_console_neogeo;
 extern const console_handler_t g_console_gba;
 extern const console_handler_t g_console_megacd;
 extern const console_handler_t g_console_atari2600;
+extern const console_handler_t g_console_tgfx16;
 
 // Master lookup table
 static const console_handler_t *g_console_handlers[] = {
@@ -30,6 +31,7 @@ static const console_handler_t *g_console_handlers[] = {
 	&g_console_gba,
 	&g_console_megacd,
 	&g_console_atari2600,
+	&g_console_tgfx16,
 	NULL
 };
 
@@ -70,6 +72,10 @@ const console_handler_t *get_console_handler_by_id(int console_id)
 	// Game Gear (ID 15) uses SMS handler (ID 11)
 	if (console_id == 15) {
 		return &g_console_sms;
+	}
+	// PC Engine CD (ID 76) uses TG16 handler (ID 8)
+	if (console_id == 76) {
+		return &g_console_tgfx16;
 	}
 
 	return NULL;
