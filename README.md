@@ -19,6 +19,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | Mega CD / Sega CD | 9 | [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer) |
 | NeoGeo (MVS / AES / CD) | 27 | [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer) |
 | TurboGrafx-16 / PC Engine | 8 | [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer) |
+| Atari 2600 (via Atari7800 core) | 25 | [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer) |
 
 ## How to Test
 
@@ -66,7 +67,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│  FPGA Core (NES / SNES / Genesis / SMS / GB / GBA / N64 / PSX / MCD / NeoGeo / TG16) │
+│  FPGA Core (NES / SNES / Genesis / SMS / GB / GBA / N64 / PSX / MCD / NeoGeo / TG16 / Atari2600) │
 │  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
 │  every VBlank (~60 Hz)                                │
 └──────────────────────┬────────────────────────────────┘
@@ -199,6 +200,12 @@ Uses the selective address protocol with a dual-path memory architecture. The FP
 
 The core's existing `ddram.sv` was extended with an RA arbiter that gives RA secondary priority behind the core. When the core has no pending request and DDRAM is idle, the RA mirror takes over for one transaction. CD/SCD RAM is accessed as 64-bit DDRAM words with byte extraction. The module runs on `clk_sys` (~21.477 MHz) and supports both HuCard-only games (8 KB Work RAM) and CD-ROM/Super CD-ROM titles (up to 264 KB). Total exposed: **264 KB**.
 
+#### Atari 2600 (via Atari7800 core) — Full Mirror (`ra_riot_mirror.sv`)
+The simplest mirror in the project — the entire 128-byte RIOT (M6532) internal RAM is copied to DDRAM on every VBlank. No address list or handshake is needed.
+- **RIOT RAM** ($0080–$00FF) — 128 bytes (M6532 internal BRAM, async read port)
+
+The Atari7800 core supports both native 7800 games and a 2600 compatibility mode (auto-detected via game header). RA is active **only in 2600 mode** (`tia_en=1`); the mirror writes nothing when a 7800 game is loaded. The M6532 BRAM already had a read port exposed from the emulation; the `ra_riot_mirror.sv` module reads all 128 bytes sequentially via an async port and writes them in 16 × 64-bit chunks to DDRAM channel 2 (a dedicated write-only channel added to the existing `ddram.sv`). Total exposed: **128 bytes**.
+
 ### `AddAddress` Support — Pointer Resolution
 
 Several achievement conditions use the `AddAddress` operator, which reads a pointer from memory and adds its value to a base address to obtain the actual memory location to evaluate. In the Selective Address protocol, this creates a bootstrapping problem: on first collection, all cached values are zero, so `AddAddress` conditions compute `base + 0` and only request the pointer address itself — the real target address cannot be known until the pointer's actual value is available.
@@ -222,6 +229,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | Mega CD | every ~5 min (~18 000 frames) | No |
 | NeoGeo | every ~5 min (~18 000 frames) | No |
 | TG16 | every ~5 min (~18 000 frames) | No |
+| Atari 2600 | every frame (full mirror, no re-collection needed) | N/A |
 | PSX | every ~10 s (~600 frames) | Yes (1 pass) |
 | N64 | every ~10 s (~600 frames) | Yes (up to 4 passes) |
 
@@ -240,6 +248,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | NeoGeo | `rc_hash_generate_from_file()` from rcheevos — handles filename-based hashing for arcade ROM sets natively |
 | TG16 (HuCard) | MD5 of ROM data, skipping optional 512-byte copier header (detected when `file_size % 1024 == 512`) |
 | TG16 (CD-ROM) | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, `.ccd`, `.iso`, and `.img` disc images natively |
+| Atari 2600 | MD5 of the raw ROM file (`.a26`) — no header stripping needed |
 
 ### How It Works
 
@@ -272,6 +281,7 @@ Currently achievements run in **softcore mode** (savestates allowed). Hardcore m
    - **Mega CD / Sega CD**: [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer)
    - **NeoGeo (MVS / AES / CD)**: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
    - **TurboGrafx-16 / PC Engine**: [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer)
+   - **Atari 2600** (load a `.a26` ROM in the Atari7800 core): [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer)
 5. Reboot your MiSTer, load the core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
 6. (Optional) Place an `achievement.wav` file in `/media/fat/` to hear a sound effect on unlock.
 
@@ -306,5 +316,6 @@ The Makefile automatically detects the rcheevos library and enables it if presen
 - Modified MegaCD core: [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer)
 - Modified NeoGeo core: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
 - Modified TurboGrafx-16 core: [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer)
+- Modified Atari7800 core (Atari 2600 RA): [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer)
 - RetroAchievements: [retroachievements.org](https://retroachievements.org/)
 - rcheevos library: [RetroAchievements/rcheevos](https://github.com/RetroAchievements/rcheevos)
