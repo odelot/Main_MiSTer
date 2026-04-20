@@ -96,6 +96,8 @@ static int sms_poll(void *map, void *client, int game_loaded)
 			g_sms_state.last_resp_frame = resp_frame;
 			g_sms_state.game_frames++;
 			ra_frame_processed(resp_frame);
+			clock_gettime(CLOCK_MONOTONIC, &g_sms_state.stall_time);
+			g_sms_state.stall_frame = resp_frame;
 
 			// Re-collect every ~5 min to catch address changes
 			int re_collect = (g_sms_state.game_frames % 18000 == 0) && (g_sms_state.game_frames > 0);
@@ -113,6 +115,8 @@ static int sms_poll(void *map, void *client, int game_loaded)
 						ra_snes_addrlist_count());
 				}
 			}
+		} else {
+			optionc_check_stall_recovery(&g_sms_state, resp_frame, "SMS");
 		}
 	}
 

@@ -143,6 +143,8 @@ static int gba_poll(void *map, void *client, int game_loaded)
                         g_gba_state.last_resp_frame = resp_frame;
                         g_gba_state.game_frames++;
                         ra_frame_processed(resp_frame);
+                        clock_gettime(CLOCK_MONOTONIC, &g_gba_state.stall_time);
+                        g_gba_state.stall_frame = resp_frame;
 
                         if (g_gba_state.game_frames <= 5) {
                                 ra_log_write("GBA OptionC: GameFrame %u (resp_frame=%u)\n",
@@ -166,6 +168,8 @@ static int gba_poll(void *map, void *client, int game_loaded)
                                                 ra_snes_addrlist_count());
                                 }
                         }
+                } else {
+                	optionc_check_stall_recovery(&g_gba_state, resp_frame, "GBA");
                 }
         }
 

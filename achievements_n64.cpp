@@ -193,6 +193,8 @@ static int n64_poll(void *map, void *client, int game_loaded)
 			g_n64_state.last_resp_frame = resp_frame;
 			g_n64_state.game_frames++;
 			ra_frame_processed(resp_frame);
+			clock_gettime(CLOCK_MONOTONIC, &g_n64_state.stall_time);
+			g_n64_state.stall_frame = resp_frame;
 
 			if (g_n64_state.game_frames <= 5)
 				ra_log_write("N64 OptionC: GameFrame %u (resp_frame=%u)\n",
@@ -229,6 +231,8 @@ static int n64_poll(void *map, void *client, int game_loaded)
 					g_n64_state.resolve_pass = 0;
 				}
 			}
+		} else {
+			optionc_check_stall_recovery(&g_n64_state, resp_frame, "N64");
 		}
 	}
 

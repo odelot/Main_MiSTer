@@ -97,6 +97,8 @@ static int megacd_poll(void *map, void *client, int game_loaded)
 			g_mcd_state.last_resp_frame = resp_frame;
 			g_mcd_state.game_frames++;
 			ra_frame_processed(resp_frame);
+			clock_gettime(CLOCK_MONOTONIC, &g_mcd_state.stall_time);
+			g_mcd_state.stall_frame = resp_frame;
 
 			// Early-frame valcache dump (first 5 frames)
 			if (g_mcd_state.game_frames <= 5) {
@@ -153,6 +155,8 @@ static int megacd_poll(void *map, void *client, int game_loaded)
 						ra_snes_addrlist_count());
 				}
 			}
+		} else {
+			optionc_check_stall_recovery(&g_mcd_state, resp_frame, "MegaCD");
 		}
 	}
 

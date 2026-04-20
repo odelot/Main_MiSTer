@@ -174,6 +174,7 @@ static int g_show_challenge_hide_popup = 1; // 1 = show popup on challenge HIDE 
 static int g_show_progress_popups      = 1; // 1 = show progress indicator popups
 static int g_show_progress_name        = 1; // 1 = include achievement name in progress popup
 static int g_hardcore                  = 0; // 1 = hardcore mode (disables cheats & save states)
+static int g_stall_recovery            = 0; // 1 = enable OptionC stall recovery (disabled by default)
 static char g_ua_clause[64]            = ""; // rcheevos user-agent clause (e.g. "rcheevos/11.6")
 
 // ---------------------------------------------------------------------------
@@ -493,6 +494,8 @@ static int ra_load_credentials(void)
 			g_show_progress_name = atoi(val);
 		} else if (!strcasecmp(key, "hardcore")) {
 			g_hardcore = atoi(val);
+		} else if (!strcasecmp(key, "stall_recovery")) {
+			g_stall_recovery = atoi(val);
 		}
 	}
 	fclose(f);
@@ -503,9 +506,9 @@ static int ra_load_credentials(void)
 	}
 
 	RA_LOG("Credentials loaded: user=%s password=***(%zu chars)", g_ra_user, strlen(g_ra_password));
-	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d hardcore=%d",
+	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d hardcore=%d stall_recovery=%d",
 		g_show_challenge_show_popup, g_show_challenge_hide_popup,
-		g_show_progress_popups, g_show_progress_name, g_hardcore);
+		g_show_progress_popups, g_show_progress_name, g_hardcore, g_stall_recovery);
 	return 1;
 }
 
@@ -1258,6 +1261,11 @@ int achievements_active(void)
 int achievements_hardcore_active(void)
 {
 	return g_hardcore;
+}
+
+int achievements_stall_recovery_enabled(void)
+{
+	return g_stall_recovery;
 }
 
 void achievements_info(void)

@@ -45,5 +45,6 @@ int achievements_hardcore_active(void);
 
 // Update global frame counters (called by per-console poll handlers)
 void ra_frame_processed(uint32_t frame);
+int achievements_stall_recovery_enabled(void);
 
 #endif // ACHIEVEMENTS_H

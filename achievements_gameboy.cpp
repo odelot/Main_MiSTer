@@ -116,6 +116,8 @@ static int gameboy_poll(void *map, void *client, int game_loaded)
 			g_gb_state.last_resp_frame = resp_frame;
 			g_gb_state.game_frames++;
 			ra_frame_processed(resp_frame);
+			clock_gettime(CLOCK_MONOTONIC, &g_gb_state.stall_time);
+			g_gb_state.stall_frame = resp_frame;
 
 			// Periodically re-collect to catch address changes (every ~5 min)
 			int re_collect = (g_gb_state.game_frames % 18000 == 0) && (g_gb_state.game_frames > 0);
@@ -147,6 +149,8 @@ static int gameboy_poll(void *map, void *client, int game_loaded)
 						ra_snes_addrlist_count());
 				}
 			}
+		} else {
+			optionc_check_stall_recovery(&g_gb_state, resp_frame, "GameBoy");
 		}
 	}
 
