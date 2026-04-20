@@ -39,6 +39,10 @@ static void atari2600_reset(void)
 
 static uint32_t atari2600_read_memory(void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes)
 {
+	// region_count=1 -> 2600 (128-byte RIOT), region_count=2 -> 7800 (4KB RAM)
+	uint8_t region_count = map ? ((const uint8_t *)map)[4] : 1;
+	if (region_count == 2)
+		return ra_ramread_atari7800_read(map, address, buffer, num_bytes);
 	return ra_ramread_atari2600_read(map, address, buffer, num_bytes);
 }
 

@@ -68,6 +68,7 @@ extern const console_handler_t g_console_gba;
 extern const console_handler_t g_console_megacd;
 extern const console_handler_t g_console_atari2600;
 extern const console_handler_t g_console_tgfx16;
+extern const console_handler_t g_console_s32x;
 
 // Get console handler by core name (returns NULL if not found)
 const console_handler_t *get_console_handler_by_name(const char *core_name);

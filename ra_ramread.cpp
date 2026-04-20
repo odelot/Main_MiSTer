@@ -174,6 +174,32 @@ uint32_t ra_ramread_atari2600_read(const void *map, uint32_t address, uint8_t *b
 	return num_bytes;
 }
 
+// ---------------------------------------------------------------------------
+// Atari 7800 — 4 KB internal RAM (ram0 + ram1)
+//   addr 0x0000-0x07FF -> ram0, DDRAM offset 0x100
+//   addr 0x0800-0x0FFF -> ram1, DDRAM offset 0x900
+// ---------------------------------------------------------------------------
+uint8_t ra_ramread_atari7800_byte(const void *map, uint16_t addr)
+{
+	if (!map) return 0;
+	const ra_header_t *hdr = (const ra_header_t *)map;
+	if (hdr->magic != RA_MAGIC) return 0;
+	if (addr < 0x0800) {
+		return ((const uint8_t *)map + 0x100)[addr];
+	} else if (addr < 0x1000) {
+		return ((const uint8_t *)map + 0x900)[addr - 0x0800];
+	}
+	return 0;
+}
+
+uint32_t ra_ramread_atari7800_read(const void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes)
+{
+	for (uint32_t i = 0; i < num_bytes; i++) {
+		buffer[i] = ra_ramread_atari7800_byte(map, (uint16_t)(address + i));
+	}
+	return num_bytes;
+}
+
 void ra_ramread_debug_dump(const void *map)
 {
 	RA_DBG("=== DDRAM Mirror Diagnostic Dump ===");
