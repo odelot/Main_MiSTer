@@ -33,13 +33,19 @@ static uint32_t nes_read_memory(void *map, uint32_t address, uint8_t *buffer, ui
 	return ra_ramread_nes_read(map, address, buffer, num_bytes);
 }
 
-static void nes_poll(void *map, void *client, int game_loaded)
+static int nes_poll(void *map, void *client, int game_loaded)
 {
 	(void)map;
 	(void)client;
 	(void)game_loaded;
 	// NES uses default frame tracking (no Option C)
-	// All polling logic is handled in main achievements_poll()
+	return 0; // fall through to achievements_poll default path
+}
+
+static void nes_detect_protocol(void *map)
+{
+	(void)map;
+	// NES uses region-based layout; no protocol detection needed
 }
 
 static int nes_calculate_hash(const char *rom_path, char *md5_hex_out)
@@ -129,6 +135,7 @@ const console_handler_t g_console_nes = {
 	.poll = nes_poll,
 	.calculate_hash = nes_calculate_hash,
 	.set_hardcore = nes_set_hardcore,
+	.detect_protocol = nes_detect_protocol,
 	.console_id = 7,  // RC_CONSOLE_NINTENDO
 	.name = "NES"
 };

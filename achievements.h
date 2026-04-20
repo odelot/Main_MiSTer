@@ -43,4 +43,7 @@ void achievements_info(void);
 // Returns 1 if hardcore mode is enabled in retroachievements.cfg
 int achievements_hardcore_active(void);
 
+// Update global frame counters (called by per-console poll handlers)
+void ra_frame_processed(uint32_t frame);
+
 #endif // ACHIEVEMENTS_H
