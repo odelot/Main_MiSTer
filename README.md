@@ -18,6 +18,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | GBA (Game Boy Advance) | 5 | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
 | Mega CD / Sega CD | 9 | [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer) |
 | NeoGeo (MVS / AES / CD) | 27 | [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer) |
+| TurboGrafx-16 / PC Engine | 8 | [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer) |
 
 ## How to Test
 
@@ -65,7 +66,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│  FPGA Core (NES / SNES / Genesis / SMS / GB / GBA / N64 / PSX / MCD / NeoGeo) │
+│  FPGA Core (NES / SNES / Genesis / SMS / GB / GBA / N64 / PSX / MCD / NeoGeo / TG16) │
 │  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
 │  every VBlank (~60 Hz)                                │
 └──────────────────────┬────────────────────────────────┘
@@ -190,6 +191,14 @@ In **CD mode**, the WRAML/WRAMU BRAMs are repurposed for Z80 RAM and the 68K Wor
 
 A custom DDRAM arbiter (`ddram_arb_neogeo.sv`) sits between the existing DDRAM controller (ADPCM samples / Z80 ROM reads) and the physical DDRAM interface, letting the RA mirror steal bus cycles when the primary master is idle. Two-stage flip-flop synchronizers handle clock domain crossing between CLK_48M (RA mirror) and CLK_96M (DDRAM).
 
+#### TurboGrafx-16 / PC Engine — Selective Address (`ra_ram_mirror_tgfx16.sv`)
+Uses the selective address protocol with a dual-path memory architecture. The FPGA reads from BRAM for Work RAM and from DDRAM for CD/SCD RAM:
+- **Work RAM** ($000000–$001FFF) — 8 KB (BRAM Port B via `pce_top`, 1-cycle latency)
+- **CD RAM** ($002000–$011FFF) — 64 KB (DDRAM at offset 0x0600000)
+- **Super CD RAM** ($012000–$041FFF) — 192 KB (DDRAM at offset 0x0610000)
+
+The core's existing `ddram.sv` was extended with an RA arbiter that gives RA secondary priority behind the core. When the core has no pending request and DDRAM is idle, the RA mirror takes over for one transaction. CD/SCD RAM is accessed as 64-bit DDRAM words with byte extraction. The module runs on `clk_sys` (~21.477 MHz) and supports both HuCard-only games (8 KB Work RAM) and CD-ROM/Super CD-ROM titles (up to 264 KB). Total exposed: **264 KB**.
+
 ### `AddAddress` Support — Pointer Resolution
 
 Several achievement conditions use the `AddAddress` operator, which reads a pointer from memory and adds its value to a base address to obtain the actual memory location to evaluate. In the Selective Address protocol, this creates a bootstrapping problem: on first collection, all cached values are zero, so `AddAddress` conditions compute `base + 0` and only request the pointer address itself — the real target address cannot be known until the pointer's actual value is available.
@@ -212,6 +221,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | GBA | every ~5 min (~18 000 frames) | No |
 | Mega CD | every ~5 min (~18 000 frames) | No |
 | NeoGeo | every ~5 min (~18 000 frames) | No |
+| TG16 | every ~5 min (~18 000 frames) | No |
 | PSX | every ~10 s (~600 frames) | Yes (1 pass) |
 | N64 | every ~10 s (~600 frames) | Yes (up to 4 passes) |
 
@@ -228,6 +238,8 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | N64 | `rc_hash_generate_from_file()` from rcheevos — handles `.z64`, `.n64`, and `.v64` byte orders natively |
 | PSX | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, and `.iso` disc images natively |
 | NeoGeo | `rc_hash_generate_from_file()` from rcheevos — handles filename-based hashing for arcade ROM sets natively |
+| TG16 (HuCard) | MD5 of ROM data, skipping optional 512-byte copier header (detected when `file_size % 1024 == 512`) |
+| TG16 (CD-ROM) | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, `.ccd`, `.iso`, and `.img` disc images natively |
 
 ### How It Works
 
@@ -259,6 +271,7 @@ Currently achievements run in **softcore mode** (savestates allowed). Hardcore m
    - **GBA**: [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer)
    - **Mega CD / Sega CD**: [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer)
    - **NeoGeo (MVS / AES / CD)**: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
+   - **TurboGrafx-16 / PC Engine**: [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer)
 5. Reboot your MiSTer, load the core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
 6. (Optional) Place an `achievement.wav` file in `/media/fat/` to hear a sound effect on unlock.
 
@@ -292,5 +305,6 @@ The Makefile automatically detects the rcheevos library and enables it if presen
 - Modified GBA core: [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer)
 - Modified MegaCD core: [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer)
 - Modified NeoGeo core: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
+- Modified TurboGrafx-16 core: [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer)
 - RetroAchievements: [retroachievements.org](https://retroachievements.org/)
 - rcheevos library: [RetroAchievements/rcheevos](https://github.com/RetroAchievements/rcheevos)
