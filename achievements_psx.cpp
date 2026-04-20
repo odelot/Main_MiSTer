@@ -21,6 +21,7 @@
 static console_state_t g_psx_state = {};
 static int g_psx_rtquery = 0; // 1 if FPGA supports realtime queries
 
+
 // ---------------------------------------------------------------------------
 // PSX Option C Diagnostics
 // ---------------------------------------------------------------------------
@@ -154,6 +155,8 @@ static int psx_poll(void *map, void *client, int game_loaded)
 			g_psx_state.last_resp_frame = resp_frame;
 			g_psx_state.game_frames++;
 			ra_frame_processed(resp_frame);
+			clock_gettime(CLOCK_MONOTONIC, &g_psx_state.stall_time);
+			g_psx_state.stall_frame = resp_frame;
 
 			if (g_psx_state.game_frames <= 5) {
 				ra_log_write("PSX OptionC: GameFrame %u (resp_frame=%u)\n",
@@ -178,6 +181,8 @@ static int psx_poll(void *map, void *client, int game_loaded)
 					g_psx_state.cache_ready = 0; // wait for new FPGA data
 				}
 			}
+		} else {
+			optionc_check_stall_recovery(&g_psx_state, resp_frame, "PSX");
 		}
 	}
 

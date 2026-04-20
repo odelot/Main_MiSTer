@@ -139,6 +139,8 @@ static int neogeo_poll(void *map, void *client, int game_loaded)
 			g_neogeo_state.last_resp_frame = resp_frame;
 			g_neogeo_state.game_frames++;
 			ra_frame_processed(resp_frame);
+			clock_gettime(CLOCK_MONOTONIC, &g_neogeo_state.stall_time);
+			g_neogeo_state.stall_frame = resp_frame;
 
 			// Re-collect every 18000 frames (~5min).
 			// Do NOT invalidate cache: avoids zeros during active gameplay.
@@ -157,6 +159,8 @@ static int neogeo_poll(void *map, void *client, int game_loaded)
 						ra_snes_addrlist_count());
 				}
 			}
+		} else {
+			optionc_check_stall_recovery(&g_neogeo_state, resp_frame, "NeoGeo");
 		}
 	}
 

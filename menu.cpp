@@ -2705,6 +2705,7 @@ void HandleUI(void)
 			{
 				pcecd_set_image(ioctl_index, selPath);
 				cheats_init(selPath, 0);
+				achievements_load_game(selPath, 0);
 			}
 			else if (is_psx() && ioctl_index == 1)
 			{

@@ -96,6 +96,8 @@ static int genesis_poll(void *map, void *client, int game_loaded)
 			g_md_state.last_resp_frame = resp_frame;
 			g_md_state.game_frames++;
 			ra_frame_processed(resp_frame);
+			clock_gettime(CLOCK_MONOTONIC, &g_md_state.stall_time);
+			g_md_state.stall_frame = resp_frame;
 
 			// Early-frame valcache dump (first 5 frames)
 			if (g_md_state.game_frames <= 5) {
@@ -128,6 +130,8 @@ static int genesis_poll(void *map, void *client, int game_loaded)
 						ra_snes_addrlist_count());
 				}
 			}
+		} else {
+			optionc_check_stall_recovery(&g_md_state, resp_frame, "Genesis");
 		}
 	}
 

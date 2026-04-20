@@ -6,6 +6,7 @@
 #include "user_io.h"
 #include "lib/md5/md5.h"
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -13,6 +14,7 @@
 #ifdef HAS_RCHEEVOS
 #include "rc_client.h"
 #include "rc_consoles.h"
+#include "rc_hash.h"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -140,6 +142,8 @@ if (resp_frame > g_tgfx16_state.last_resp_frame) {
 g_tgfx16_state.last_resp_frame = resp_frame;
 g_tgfx16_state.game_frames++;
 ra_frame_processed(resp_frame);
+clock_gettime(CLOCK_MONOTONIC, &g_tgfx16_state.stall_time);
+g_tgfx16_state.stall_frame = resp_frame;
 
 if (g_tgfx16_state.game_frames <= 5) {
 ra_log_write("TGFX16 OptionC: GameFrame %u (resp_frame=%u)\n",
@@ -163,6 +167,9 @@ ra_log_write("TGFX16 OptionC: Address list refreshed, %d addrs\n",
 ra_snes_addrlist_count());
 }
 }
+
+} else {
+	optionc_check_stall_recovery(&g_tgfx16_state, resp_frame, "TGFX16");
 }
 }
 
@@ -189,12 +196,44 @@ return 0;
 #endif
 }
 
+static int tgfx16_is_cd_image(const char *path)
+{
+const char *ext = strrchr(path, '.');
+if (!ext) return 0;
+return (strcasecmp(ext, ".cue") == 0 ||
+        strcasecmp(ext, ".chd") == 0 ||
+        strcasecmp(ext, ".ccd") == 0 ||
+        strcasecmp(ext, ".iso") == 0 ||
+        strcasecmp(ext, ".img") == 0);
+}
+
 static int tgfx16_calculate_hash(const char *rom_path, char *md5_hex_out)
 {
-// PC Engine ROMs: .pce files may have a 512-byte header if size % 1024 == 512
-FILE *f = fopen(rom_path, "rb");
+char abs_path[1024];
+if (rom_path[0] == '/') {
+snprintf(abs_path, sizeof(abs_path), "%s", rom_path);
+} else {
+extern const char *getRootDir(void);
+snprintf(abs_path, sizeof(abs_path), "%s/%s", getRootDir(), rom_path);
+}
+
+#ifdef HAS_RCHEEVOS
+if (tgfx16_is_cd_image(rom_path)) {
+// PC Engine CD: use rcheevos CD hashing with console_id 76
+ra_log_write("TGFX16: CD image detected, using rc_hash (console_id=76): %s\n", abs_path);
+if (rc_hash_generate_from_file(md5_hex_out, 76, abs_path)) {
+ra_log_write("TGFX16 CD hash: %s\n", md5_hex_out);
+return 1;
+}
+ra_log_write("TGFX16: rc_hash_generate_from_file failed for %s\n", abs_path);
+return 0;
+}
+#endif
+
+// HuCard ROM: .pce files may have a 512-byte header if size % 1024 == 512
+FILE *f = fopen(abs_path, "rb");
 if (!f) {
-ra_log_write("TGFX16: Failed to open ROM for hashing: %s\n", rom_path);
+ra_log_write("TGFX16: Failed to open ROM for hashing: %s\n", abs_path);
 return 0;
 }
 

@@ -142,6 +142,8 @@ static int snes_poll(void *map, void *client, int game_loaded)
 			g_snes_state.last_resp_frame = resp_frame;
 			g_snes_state.game_frames++;
 			ra_frame_processed(resp_frame);
+			clock_gettime(CLOCK_MONOTONIC, &g_snes_state.stall_time);
+			g_snes_state.stall_frame = resp_frame;
 
 			// Dump first 5 frames after cache became active
 			if (g_snes_state.game_frames <= 5) {
@@ -166,6 +168,8 @@ static int snes_poll(void *map, void *client, int game_loaded)
 						ra_snes_addrlist_count());
 				}
 			}
+		} else {
+			optionc_check_stall_recovery(&g_snes_state, resp_frame, "SNES");
 		}
 	}
 

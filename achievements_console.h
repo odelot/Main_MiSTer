@@ -19,6 +19,8 @@ typedef struct {
 	uint32_t poll_logged;     // Last game_frames milestone logged
 	int resolve_pass;         // Current pointer-resolution pass number
 	struct timespec cache_time; // Timestamp when cache became active
+	struct timespec stall_time; // Timestamp when resp_frame last advanced
+	uint32_t stall_frame;       // resp_frame value when stall tracking started
 } console_state_t;
 
 // Console-specific interface
@@ -75,5 +77,12 @@ const console_handler_t *get_console_handler_by_id(int console_id);
 
 // Initialize all console handlers (called once at startup)
 void init_all_console_handlers(void);
+
+// Shared OptionC stall recovery check.
+// Call from the else branch of 'if (resp_frame > state->last_resp_frame)'.
+// Returns 1 if recovery was triggered (caller should reset cache_ready etc).
+// Requires: achievements_stall_recovery_enabled() from achievements.h
+int optionc_check_stall_recovery(console_state_t *state, uint32_t resp_frame,
+                                  const char *console_name);
 
 #endif // ACHIEVEMENTS_CONSOLE_H
