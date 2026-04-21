@@ -102,6 +102,8 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 4. **Unlock / Notify** — When an achievement triggers, the event handler displays an OSD notification and optionally plays a sound (`/media/fat/achievement.wav`). The unlock is reported to the RA server asynchronously.
 5. **Unload / Shutdown** — State is cleaned up when switching cores or shutting down.
 
+> Currently achievements run in **softcore mode** (savestates allowed). Hardcore mode is disabled since there is no anti-tamper mechanism yet.
+
 ### DDRAM Mirror Layout
 
 Every supported core writes a structured block at ARM physical address `0x3D000000`:
@@ -261,16 +263,6 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | TG16 (CD-ROM) | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, `.ccd`, `.iso`, and `.img` disc images natively |
 | Atari 2600 | MD5 of the raw ROM file (`.a26`) — no header stripping needed |
 | Sega 32X | `rc_hash_generate_from_file()` from rcheevos — handles `.32x` ROM files natively |
-
-### How It Works
-
-1. **On startup**, the binary loads credentials from `retroachievements.cfg`, initializes the rcheevos client, and logs in asynchronously.
-2. **When a game is loaded**, the binary hashes the ROM or disc image and queries the RA server to identify the game and fetch its achievement set.
-3. **Every frame**, `achievements_poll()` checks the DDRAM mirror's frame counter. When it advances, it calls `rc_client_do_frame()`, which reads emulated RAM via the mirror and evaluates all active achievement conditions.
-4. **When an achievement triggers**, an OSD popup is displayed with the title and description, and an optional sound effect (`/media/fat/achievement.wav`) is played.
-5. **Unlocks are reported** to the RA server via the async HTTP worker.
-
-Currently achievements run in **softcore mode** (savestates allowed). Hardcore mode is disabled since there is no anti-tamper mechanism yet.
 
 ## How to Try It
 
