@@ -104,6 +104,21 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 > Currently achievements run in **softcore mode** (savestates allowed). Hardcore mode is disabled since there is no anti-tamper mechanism yet.
 
+### Achievement List (F6)
+
+While the OSD is open and a game with achievements is loaded, press **F6** to open a scrollable achievement list for the current game. The list shows all core achievements grouped with **unlocked entries first** (marked `►`) followed by **locked entries** (marked `◄`). The OSD title displays the total count, e.g. *Achievements (42)*.
+
+Navigation inside the list:
+
+| Key | Action |
+|-----|--------|
+| ↑ / ↓ | Move one entry |
+| Page Up / ← | Previous page |
+| Page Down / → | Next page |
+| Home | Jump to first entry |
+| End | Jump to last entry |
+| Menu button | Close and return to normal OSD |
+
 ### DDRAM Mirror Layout
 
 Every supported core writes a structured block at ARM physical address `0x3D000000`:
