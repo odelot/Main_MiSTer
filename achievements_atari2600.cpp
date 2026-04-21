@@ -99,6 +99,24 @@ static int atari2600_poll(void *map, void *client, int game_loaded)
 		s_last_nonzero = nonzero;
 	}
 
+	// For 7800 mode: scan ram0 for diagnostic values
+	if (b[4] == 2) {
+		static uint8_t s_ram0_prev[512] = {0};
+		// Scan first 512 bytes of ram0 (phys 0x2000-0x21FF)
+		for (int j = 0; j < 512; j++) {
+			uint8_t v = b[256 + j];
+			if (v != s_ram0_prev[j]) {
+				// Log changes to values 1,8,10,15 OR at specific key addrs
+				if (v == 1 || v == 8 || v == 10 || v == 15 ||
+				    j == 0x53 || j == 0x5B || j == 0xBC || j == 0xC4) {
+					ra_log_write("A7800 RAM0[%03X]:%02X->%02X f=%u\n",
+						j, (unsigned)s_ram0_prev[j], v, frame_ctr);
+				}
+				s_ram0_prev[j] = v;
+			}
+		}
+	}
+
 	return 0;
 }
 

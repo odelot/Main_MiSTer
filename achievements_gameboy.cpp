@@ -184,8 +184,9 @@ static int gameboy_calculate_hash(const char *rom_path, char *md5_hex_out)
 
 static void gameboy_set_hardcore(int enabled)
 {
-	ra_log_write("GameBoy: Hardcore mode %s (no FPGA bits mapped)\n",
-		enabled ? "enabled" : "disabled");
+	user_io_status_set("[17]", enabled ? 1 : 0); // cheats off (logic inverted: 1 = disabled)
+	user_io_status_set("[51]", enabled ? 1 : 0); // hardcore bit: blocks save states in FPGA
+	ra_log_write("GameBoy: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
 static void gameboy_detect_protocol(void *map)

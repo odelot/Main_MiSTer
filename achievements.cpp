@@ -900,6 +900,12 @@ void achievements_init(void)
 	// Call handler init — N64 sets DDRAM base here, must happen before ra_ramread_map()
 	g_active_handler->init();
 
+	// Apply hardcore FPGA bits immediately so restrictions are active before any game loads
+	if (g_hardcore && g_active_handler->set_hardcore) {
+		g_active_handler->set_hardcore(1);
+		RA_LOG("Hardcore: FPGA bits applied at core init for %s", g_active_handler->name);
+	}
+
 #ifdef HAS_RCHEEVOS
 	// Initialize rcheevos hash infrastructure (needed for disc-based consoles)
 	rc_hash_init_default_cdreader();

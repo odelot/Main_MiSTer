@@ -175,19 +175,33 @@ uint32_t ra_ramread_atari2600_read(const void *map, uint32_t address, uint8_t *b
 }
 
 // ---------------------------------------------------------------------------
-// Atari 7800 — 4 KB internal RAM (ram0 + ram1)
-//   addr 0x0000-0x07FF -> ram0, DDRAM offset 0x100
-//   addr 0x0800-0x0FFF -> ram1, DDRAM offset 0x900
+// Atari 7800 -- 4 KB internal RAM (ram0 + ram1)
+//
+// Atari 7800 hardware memory map:
+//   ram1 (2KB): physical 0x1800-0x1FFF -> BRAM index = addr & 0x7FF -> DDRAM+0x900
+//   ram0 (2KB): physical 0x2000-0x27FF -> BRAM index = addr & 0x7FF -> DDRAM+0x100
+//               mirrors   0x0040-0x00FF -> BRAM index = addr & 0x7FF -> DDRAM+0x100
+//               mirrors   0x0140-0x01FF -> BRAM index = addr & 0x7FF -> DDRAM+0x100
+//
+// BRAM is indexed by AB[10:0] which equals addr & 0x7FF for all valid ranges.
+// rcheevos achievement conditions use the actual hardware addresses.
 // ---------------------------------------------------------------------------
 uint8_t ra_ramread_atari7800_byte(const void *map, uint16_t addr)
 {
 	if (!map) return 0;
 	const ra_header_t *hdr = (const ra_header_t *)map;
 	if (hdr->magic != RA_MAGIC) return 0;
-	if (addr < 0x0800) {
-		return ((const uint8_t *)map + 0x100)[addr];
-	} else if (addr < 0x1000) {
-		return ((const uint8_t *)map + 0x900)[addr - 0x0800];
+	// ram1: physical 0x1800-0x1FFF
+	if (addr >= 0x1800 && addr <= 0x1FFF)
+		return ((const uint8_t *)map + 0x900)[addr & 0x7FF];
+	// ram0: physical 0x2000-0x27FF (main) and zero-page/stack mirrors
+	// Note: requires real BIOS (boot0.rom). Without BIOS, bypass_bios shifts
+	// all game variables -8 in BRAM and inverts game-state semantics,
+	// breaking achievement reset conditions. With real BIOS, direct mapping works.
+	if ((addr >= 0x2000 && addr <= 0x27FF) ||
+	    (addr >= 0x0040 && addr <= 0x00FF) ||
+	    (addr >= 0x0140 && addr <= 0x01FF)) {
+		return ((const uint8_t *)map + 0x100)[addr & 0x7FF];
 	}
 	return 0;
 }
