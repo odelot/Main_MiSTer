@@ -43,6 +43,25 @@ void achievements_info(void);
 // Returns 1 if hardcore mode is enabled in retroachievements.cfg
 int achievements_hardcore_active(void);
 
+// Returns 1 if the user is logged in and a game is currently loaded.
+int achievements_has_active_game(void);
+
+// Open the achievement list view (builds sorted list: unlocked first, then locked).
+// Returns the total number of achievements, or 0 if not available.
+int achievements_list_open(void);
+
+// Close and free the achievement list view.
+void achievements_list_close(void);
+
+// Navigate the list. Use SCANF_NEXT, SCANF_PREV, SCANF_NEXT_PAGE, etc. from file_io.h.
+void achievements_list_scan(int mode);
+
+// Render the current page of the achievement list to the OSD.
+void achievements_list_print(void);
+
+// Returns the total count in the currently open list (0 if not open).
+int achievements_list_count(void);
+
 // Update global frame counters (called by per-console poll handlers)
 void ra_frame_processed(uint32_t frame);
 int achievements_stall_recovery_enabled(void);
