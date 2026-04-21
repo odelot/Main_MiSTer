@@ -138,6 +138,9 @@ enum MENU
 	MENU_CHEATS1,
 	MENU_CHEATS2,
 
+	MENU_RA_ACHIEVEMENTS1,
+	MENU_RA_ACHIEVEMENTS2,
+
 	MENU_UART1,
 	MENU_UART2,
 	MENU_UART3,
@@ -1293,6 +1296,21 @@ void HandleUI(void)
 				user_io_status_set("[3:1]", user_io_status_get("[3:1]") + 1);
 				user_io_status_save(user_io_create_config_name());
 				video_menu_bg(user_io_status_get("[3:1]"));
+			}
+			break;
+
+		case KEY_F6:
+			if (achievements_has_active_game())
+			{
+				int ach_count = achievements_list_open();
+				if (ach_count > 0)
+				{
+					OsdSetSize(16);
+					menusub = 0;
+					OsdClear();
+					OsdEnable(DISABLE_KEYBOARD);
+					menustate = MENU_RA_ACHIEVEMENTS1;
+				}
 			}
 			break;
 
@@ -5536,6 +5554,68 @@ void HandleUI(void)
 				cheats_toggle();
 			}
 			menustate = MENU_CHEATS1;
+		}
+		break;
+
+		/******************************************************************/
+		/* RetroAchievements list (F6 shortcut)                           */
+		/******************************************************************/
+	case MENU_RA_ACHIEVEMENTS1:
+	{
+		helptext_idx = 0;
+		char ra_title[32];
+		snprintf(ra_title, sizeof(ra_title), "Achievements (%d)", achievements_list_count());
+		OsdSetTitle(ra_title);
+		achievements_list_print();
+		menustate = MENU_RA_ACHIEVEMENTS2;
+		parentstate = menustate;
+		break;
+	}
+
+	case MENU_RA_ACHIEVEMENTS2:
+		menumask = 0;
+
+		if (menu)
+		{
+			achievements_list_close();
+			menustate = MENU_NONE1;
+			break;
+		}
+
+		if (c == KEY_HOME)
+		{
+			achievements_list_scan(SCANF_INIT);
+			menustate = MENU_RA_ACHIEVEMENTS1;
+		}
+
+		if (c == KEY_END)
+		{
+			achievements_list_scan(SCANF_END);
+			menustate = MENU_RA_ACHIEVEMENTS1;
+		}
+
+		if ((c == KEY_PAGEUP) || (c == KEY_LEFT))
+		{
+			achievements_list_scan(SCANF_PREV_PAGE);
+			menustate = MENU_RA_ACHIEVEMENTS1;
+		}
+
+		if ((c == KEY_PAGEDOWN) || (c == KEY_RIGHT))
+		{
+			achievements_list_scan(SCANF_NEXT_PAGE);
+			menustate = MENU_RA_ACHIEVEMENTS1;
+		}
+
+		if (down)
+		{
+			achievements_list_scan(SCANF_NEXT);
+			menustate = MENU_RA_ACHIEVEMENTS1;
+		}
+
+		if (up)
+		{
+			achievements_list_scan(SCANF_PREV);
+			menustate = MENU_RA_ACHIEVEMENTS1;
 		}
 		break;
 

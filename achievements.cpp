@@ -20,6 +20,7 @@
 #include "user_io.h"
 #include "file_io.h"
 #include "menu.h"
+#include "osd.h"
 #include "hardware.h"
 #include "lib/md5/md5.h"
 
@@ -1342,4 +1343,177 @@ void achievements_info(void)
 	#undef NOTIF_APPEND
 
 	Info(buf, 4000, 0, 0, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Achievement list view (F6 shortcut)
+// ---------------------------------------------------------------------------
+
+#ifdef HAS_RCHEEVOS
+static rc_client_achievement_list_t *g_ach_view_list = nullptr;
+#endif
+static int g_ach_view_first    = 0;
+static int g_ach_view_selected = 0;
+static int g_ach_view_total    = 0;
+
+// Convert flat index to the achievement pointer, iterating buckets in order.
+#ifdef HAS_RCHEEVOS
+static const rc_client_achievement_t *ach_at_flat_index(int flat_idx)
+{
+	if (!g_ach_view_list) return nullptr;
+	// LOCK_STATE grouping orders buckets as LOCKED…UNLOCKED, so iterate in reverse
+	// to present unlocked achievements first.
+	for (int b = (int)g_ach_view_list->num_buckets - 1; b >= 0; b--) {
+		if (flat_idx < (int)g_ach_view_list->buckets[b].num_achievements)
+			return g_ach_view_list->buckets[b].achievements[flat_idx];
+		flat_idx -= (int)g_ach_view_list->buckets[b].num_achievements;
+	}
+	return nullptr;
+}
+#endif
+
+int achievements_has_active_game(void)
+{
+#ifdef HAS_RCHEEVOS
+	return g_logged_in && g_game_loaded;
+#else
+	return 0;
+#endif
+}
+
+int achievements_list_open(void)
+{
+	achievements_list_close();
+#ifdef HAS_RCHEEVOS
+	if (!g_client || !g_logged_in || !g_game_loaded)
+		return 0;
+
+	// LOCK_STATE grouping: bucket 0 = unlocked, bucket 1 = locked — gives us unlocked-first order.
+	g_ach_view_list = rc_client_create_achievement_list(g_client,
+		RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE,
+		RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+	if (!g_ach_view_list)
+		return 0;
+
+	uint32_t total = 0;
+	for (uint32_t b = 0; b < g_ach_view_list->num_buckets; b++)
+		total += g_ach_view_list->buckets[b].num_achievements;
+	g_ach_view_total = (int)total;
+#else
+	g_ach_view_total = 0;
+#endif
+	g_ach_view_first    = 0;
+	g_ach_view_selected = 0;
+	return g_ach_view_total;
+}
+
+void achievements_list_close(void)
+{
+#ifdef HAS_RCHEEVOS
+	if (g_ach_view_list) {
+		rc_client_destroy_achievement_list(g_ach_view_list);
+		g_ach_view_list = nullptr;
+	}
+#endif
+	g_ach_view_first    = 0;
+	g_ach_view_selected = 0;
+	g_ach_view_total    = 0;
+}
+
+int achievements_list_count(void)
+{
+	return g_ach_view_total;
+}
+
+void achievements_list_scan(int mode)
+{
+	int total    = g_ach_view_total;
+	int osd_size = OsdGetSize();
+	if (total == 0) return;
+
+	switch (mode) {
+		case SCANF_INIT:
+			g_ach_view_selected = 0;
+			g_ach_view_first    = 0;
+			break;
+		case SCANF_END:
+			g_ach_view_selected = total - 1;
+			g_ach_view_first    = total - osd_size;
+			if (g_ach_view_first < 0) g_ach_view_first = 0;
+			break;
+		case SCANF_NEXT:
+			if (g_ach_view_selected < total - 1) {
+				g_ach_view_selected++;
+				if (g_ach_view_selected >= g_ach_view_first + osd_size)
+					g_ach_view_first++;
+			}
+			break;
+		case SCANF_PREV:
+			if (g_ach_view_selected > 0) {
+				g_ach_view_selected--;
+				if (g_ach_view_selected < g_ach_view_first)
+					g_ach_view_first--;
+			}
+			break;
+		case SCANF_NEXT_PAGE:
+			g_ach_view_selected += osd_size;
+			if (g_ach_view_selected >= total) g_ach_view_selected = total - 1;
+			g_ach_view_first += osd_size;
+			if (g_ach_view_first > total - osd_size) g_ach_view_first = total - osd_size;
+			if (g_ach_view_first < 0) g_ach_view_first = 0;
+			break;
+		case SCANF_PREV_PAGE:
+			g_ach_view_selected -= osd_size;
+			if (g_ach_view_selected < 0) g_ach_view_selected = 0;
+			g_ach_view_first -= osd_size;
+			if (g_ach_view_first < 0) g_ach_view_first = 0;
+			break;
+	}
+}
+
+void achievements_list_print(void)
+{
+	static char s[32];
+	int total    = g_ach_view_total;
+	int osd_size = OsdGetSize();
+
+	for (int i = 0; i < osd_size; i++) {
+		int idx      = g_ach_view_first + i;
+		char leftchar = 0;
+
+		if (i == 0 && g_ach_view_first > 0)
+			leftchar = 17;
+		if (i == osd_size - 1 && (g_ach_view_first + osd_size) < total)
+			leftchar = 16;
+
+		if (idx < total) {
+#ifdef HAS_RCHEEVOS
+			const rc_client_achievement_t *ach = ach_at_flat_index(idx);
+			if (ach) {
+				bool unlocked = (ach->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED);
+				s[0] = ' ';
+				s[1] = unlocked ? 0x1a : 0x1b;
+				s[2] = ' ';
+				strncpy(s + 3, ach->title, 26);
+				s[29] = 0;
+				int len = (int)strlen(s);
+				if (len > 28) {
+					s[28] = 22; // continuation marker (more text follows)
+					s[29] = 0;
+				}
+			} else {
+				memset(s, ' ', 29);
+				s[29] = 0;
+			}
+#else
+			memset(s, ' ', 29);
+			s[29] = 0;
+#endif
+		} else {
+			memset(s, ' ', 29);
+			s[29] = 0;
+		}
+
+		OsdWriteOffset(i, s, (idx == g_ach_view_selected), 0, 0, leftchar);
+	}
 }
