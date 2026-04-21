@@ -20,6 +20,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | NeoGeo (MVS / AES / CD) | 27 | [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer) |
 | TurboGrafx-16 / PC Engine | 8 | [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer) |
 | Atari 2600 (via Atari7800 core) | 25 | [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer) |
+| Sega 32X | 10 | [odelot/S32X_MiSTer](https://github.com/odelot/S32X_MiSTer) |
 
 ## How to Test
 
@@ -41,7 +42,7 @@ The [upstream Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer) binary m
 | File | Purpose |
 |------|--------|
 | `achievements.cpp / .h` | Core lifecycle — init, load game, per-frame poll, unload, OSD popups |
-| `achievements_<console>.cpp` | Per-console handlers (NES, SNES, Genesis, MegaCD, SMS, Gameboy, GBA, N64, PSX, NeoGeo, Atari 2600) |
+| `achievements_<console>.cpp` | Per-console handlers (NES, SNES, Genesis, MegaCD, SMS, Gameboy, GBA, N64, PSX, NeoGeo, Atari 2600, Sega 32X) |
 | `achievements_console.h` | Console handler interface (`console_handler_t` struct) |
 | `achievements_console_lookup.cpp` | Dispatch table mapping core names to console handlers |
 | `ra_http.cpp / .h` | Async HTTP worker thread that executes RetroAchievements API calls via `curl` |
@@ -67,7 +68,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│  FPGA Core (NES / SNES / Genesis / SMS / GB / GBA / N64 / PSX / MCD / NeoGeo / TG16 / Atari2600) │
+│  FPGA Core (NES / SNES / Genesis / SMS / GB / GBA / N64 / PSX / MCD / NeoGeo / TG16 / Atari2600 / S32X) │
 │  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
 │  every VBlank (~60 Hz)                                │
 └──────────────────────┬────────────────────────────────┘
@@ -206,6 +207,15 @@ The simplest mirror in the project — the entire 128-byte RIOT (M6532) internal
 
 The Atari7800 core supports both native 7800 games and a 2600 compatibility mode (auto-detected via game header). RA is active **only in 2600 mode** (`tia_en=1`); the mirror writes nothing when a 7800 game is loaded. The M6532 BRAM already had a read port exposed from the emulation; the `ra_riot_mirror.sv` module reads all 128 bytes sequentially via an async port and writes them in 16 × 64-bit chunks to DDRAM channel 2 (a dedicated write-only channel added to the existing `ddram.sv`). Total exposed: **128 bytes**.
 
+#### Sega 32X — Selective Address (`ra_ram_mirror_s32x.sv`)
+The most architecturally complex core in the project — the 32X exposes two RAM regions from two entirely different physical backends:
+- **68K Work RAM** ($00000–$0FFFF) — 64 KB (on-chip BRAM inside the GEN module, Port B read, 2-cycle latency)
+- **SH2 SDRAM / 32X RAM** ($10000–$4FFFF) — 256 KB (DDR3, accessed via the `ddram_arb_s32x` interposer)
+
+Rather than adding a new channel to `ddram.sv`, a dedicated arbiter (`ddram_arb_s32x.sv`) is inserted as an **interposer** between `ddram.sv` and the physical DDR3 pins. When `ddram.sv` is idle (no burst in flight), the arbiter steals one read or write transaction for the RA mirror. Clock domain crossing between `clk_sys` (RA mirror) and `clk_ram` (DDR3 controller) is handled with two-stage flip-flop synchronisers on all toggle signals.
+
+The SH2 is big-endian: byte 0 is at DDR word bits [63:56]. rcheevos expects little-endian byte order within each halfword, so the byte-lane extraction applies `offset ^ 3'd1` to swap lanes correctly. The GEN module was extended with three new ports (`RA_BRAM_ADDR[14:0]`, `RA_BRAM_U[7:0]`, `RA_BRAM_L[7:0]`) exposing a secondary read port on the 68K Work RAM BRAM — no FC1004 address inversion is needed here (unlike the standalone Genesis core). Total exposed: **320 KB**.
+
 ### `AddAddress` Support — Pointer Resolution
 
 Several achievement conditions use the `AddAddress` operator, which reads a pointer from memory and adds its value to a base address to obtain the actual memory location to evaluate. In the Selective Address protocol, this creates a bootstrapping problem: on first collection, all cached values are zero, so `AddAddress` conditions compute `base + 0` and only request the pointer address itself — the real target address cannot be known until the pointer's actual value is available.
@@ -230,6 +240,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | NeoGeo | every ~5 min (~18 000 frames) | No |
 | TG16 | every ~5 min (~18 000 frames) | No |
 | Atari 2600 | every frame (full mirror, no re-collection needed) | N/A |
+| Sega 32X | every ~5 min (~18 000 frames) | No |
 | PSX | every ~10 s (~600 frames) | Yes (1 pass) |
 | N64 | every ~10 s (~600 frames) | Yes (up to 4 passes) |
 
@@ -249,6 +260,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | TG16 (HuCard) | MD5 of ROM data, skipping optional 512-byte copier header (detected when `file_size % 1024 == 512`) |
 | TG16 (CD-ROM) | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin`, `.chd`, `.ccd`, `.iso`, and `.img` disc images natively |
 | Atari 2600 | MD5 of the raw ROM file (`.a26`) — no header stripping needed |
+| Sega 32X | `rc_hash_generate_from_file()` from rcheevos — handles `.32x` ROM files natively |
 
 ### How It Works
 
@@ -282,6 +294,7 @@ Currently achievements run in **softcore mode** (savestates allowed). Hardcore m
    - **NeoGeo (MVS / AES / CD)**: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
    - **TurboGrafx-16 / PC Engine**: [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer)
    - **Atari 2600** (load a `.a26` ROM in the Atari7800 core): [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer)
+   - **Sega 32X**: [odelot/S32X_MiSTer](https://github.com/odelot/S32X_MiSTer)
 5. Reboot your MiSTer, load the core, and open a game that has achievements on [retroachievements.org](https://retroachievements.org/).
 6. (Optional) Place an `achievement.wav` file in `/media/fat/` to hear a sound effect on unlock.
 
@@ -317,5 +330,6 @@ The Makefile automatically detects the rcheevos library and enables it if presen
 - Modified NeoGeo core: [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer)
 - Modified TurboGrafx-16 core: [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer)
 - Modified Atari7800 core (Atari 2600 RA): [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer)
+- Modified Sega 32X core: [odelot/S32X_MiSTer](https://github.com/odelot/S32X_MiSTer)
 - RetroAchievements: [retroachievements.org](https://retroachievements.org/)
 - rcheevos library: [RetroAchievements/rcheevos](https://github.com/RetroAchievements/rcheevos)
