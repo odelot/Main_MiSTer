@@ -265,13 +265,17 @@ static void gba_init_flash_ddram(void)
         shmem_unmap(flash, GBA_FLASH_SIZE);
 }
 
-static void gba_detect_protocol(void *map)
+static int gba_detect_protocol(void *map)
 {
-        if (!map) return;
+        if (!ra_ramread_active(map)) {
+                ra_log_write("GBA: FPGA mirror not detected -- RA support unavailable\n");
+                return 0;
+        }
         // GBA always uses Option C
         g_gba_state.optionc = 1;
         gba_init_flash_ddram();
         ra_log_write("GBA FPGA protocol: Option C (selective address reading)\n");
+        return 1;
 }
 
 // ---------------------------------------------------------------------------

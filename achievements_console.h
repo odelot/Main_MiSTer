@@ -45,8 +45,9 @@ typedef struct {
 	// Set hardcore mode bits (NULL = no FPGA mapping for this console)
 	void (*set_hardcore)(int enabled);
 
-	// Detect FPGA protocol type (called when DDRAM mirror first activates)
-	void (*detect_protocol)(void *map);
+	// Detect FPGA protocol type (called when DDRAM mirror first activates).
+	// Returns 1 if FPGA is adapted for RA, 0 if not (login/load will be suppressed).
+	int (*detect_protocol)(void *map);
 
 	// Get console ID (RC_CONSOLE_*)
 	int console_id;

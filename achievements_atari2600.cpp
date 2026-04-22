@@ -106,9 +106,11 @@ static int atari2600_poll(void *map, void *client, int game_loaded)
 		for (int j = 0; j < 512; j++) {
 			uint8_t v = b[256 + j];
 			if (v != s_ram0_prev[j]) {
-				// Log changes to values 1,8,10,15 OR at specific key addrs
-				if (v == 1 || v == 8 || v == 10 || v == 15 ||
-				    j == 0x53 || j == 0x5B || j == 0xBC || j == 0xC4) {
+				// Key addrs: 0x5B=game-state, 0xBC=hammer-timer, 0x84/0x85=round/sub
+				if (v == 0x0F || v == 1 || v == 8 || v == 10 ||
+				    j == 0x53 || j == 0x5B ||
+				    j == 0xBC || j == 0xC4 ||
+				    j == 0x84 || j == 0x85) {
 					ra_log_write("A7800 RAM0[%03X]:%02X->%02X f=%u\n",
 						j, (unsigned)s_ram0_prev[j], v, frame_ctr);
 				}
@@ -120,10 +122,14 @@ static int atari2600_poll(void *map, void *client, int game_loaded)
 	return 0;
 }
 
-static void atari2600_detect_protocol(void *map)
+static int atari2600_detect_protocol(void *map)
 {
-	(void)map;
+	if (!ra_ramread_active(map)) {
+		ra_log_write("ATARI2600: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
 	// Region-based layout; no protocol detection needed
+	return 1;
 }
 
 static int atari2600_calculate_hash(const char *rom_path, char *md5_hex_out)

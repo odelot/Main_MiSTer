@@ -254,14 +254,18 @@ static void neogeo_set_hardcore(int enabled)
 		enabled ? "enabled" : "disabled");
 }
 
-static void neogeo_detect_protocol(void *map)
+static int neogeo_detect_protocol(void *map)
 {
-	(void)map;
+	if (!ra_ramread_active(map)) {
+		ra_log_write("NeoGeo: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
 	// NeoGeo always uses Option C; detect CD vs MVS for byte-ordering
 	g_neogeo_state.optionc = 1;
 	g_neogeo_is_cd = is_neogeo_cd();
 	ra_log_write("%s FPGA protocol: Option C (selective address reading)\n",
 		g_neogeo_is_cd ? "NeoGeoCD" : "NeoGeo");
+	return 1;
 }
 
 // ---------------------------------------------------------------------------

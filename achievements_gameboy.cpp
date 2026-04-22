@@ -189,12 +189,16 @@ static void gameboy_set_hardcore(int enabled)
 	ra_log_write("GameBoy: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
-static void gameboy_detect_protocol(void *map)
+static int gameboy_detect_protocol(void *map)
 {
-	(void)map;
+	if (!ra_ramread_active(map)) {
+		ra_log_write("Gameboy: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
 	// GameBoy always uses Option C
 	g_gb_state.optionc = 1;
 	ra_log_write("Gameboy FPGA protocol: Option C (selective address reading)\n");
+	return 1;
 }
 
 // ---------------------------------------------------------------------------

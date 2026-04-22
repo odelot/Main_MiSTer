@@ -208,12 +208,16 @@ static void megacd_set_hardcore(int enabled)
 	ra_log_write("MegaCD: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
-static void megacd_detect_protocol(void *map)
+static int megacd_detect_protocol(void *map)
 {
-	(void)map;
+	if (!ra_ramread_active(map)) {
+		ra_log_write("MEGACD: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
 	// MegaCD always uses Option C (no VBlank-gated mode)
 	g_mcd_state.optionc = 1;
 	ra_log_write("MegaCD FPGA protocol: Option C (selective address reading)\n");
+	return 1;
 }
 
 // ---------------------------------------------------------------------------

@@ -153,6 +153,10 @@ static char g_ra_password[128] = {};
 static int g_logged_in = 0;
 static int g_login_pending = 0;
 static int g_game_load_pending = 0;
+static int g_login_deferred = 0;      // login deferred until FPGA mirror validated
+static int g_game_load_deferred = 0;  // game load deferred until
+static int      g_mirror_confirming = 0;       // magic seen, waiting for frame counter to advance
+static uint32_t g_mirror_initial_frame = 0;    // frame when magic was first seen (stale detection) FPGA mirror validated
 
 // Debug counters
 static uint32_t g_frames_processed = 0;
@@ -960,12 +964,13 @@ void achievements_init(void)
 
 	RA_LOG("rc_client created successfully");
 
-	// Begin login if credentials available
+	// Begin login if credentials available.
+	// Always defer: all cores require an adapted FPGA bitstream (magic 0x52414348).
+	// If the mirror never activates, login is silently suppressed.
 	if (has_creds) {
-		RA_LOG("Starting login for user '%s'...", g_ra_user);
-		g_login_pending = 1;
-		rc_client_begin_login_with_password(g_client, g_ra_user, g_ra_password,
-			ra_login_callback, NULL);
+		g_login_deferred = 1;
+		RA_LOG("Login deferred until FPGA mirror validated (core: '%s').",
+			g_active_handler ? g_active_handler->name : "none");
 	} else {
 		RA_LOG("No credentials — running in monitor-only mode.");
 		RA_LOG("Create %s to enable RetroAchievements.", RA_CFG_PATH);
@@ -1012,6 +1017,9 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 	g_last_frame = 0;
 	g_first_frame = 0;
 	g_mirror_validated = 0;
+	g_mirror_confirming = 0;
+	g_mirror_initial_frame = 0;
+	g_game_load_deferred = 0;
 	g_frames_processed = 0;
 	g_frames_skipped = 0;
 	g_game_loaded = 0;
@@ -1029,14 +1037,20 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 #ifdef HAS_RCHEEVOS
 	if (g_client && g_rom_md5[0]) {
 		if (g_logged_in && !g_game_load_pending) {
-			// Already logged in — load game immediately
-			RA_LOG("Logged in, loading game by MD5: %s", g_rom_md5);
-			g_game_load_pending = 1;
-			rc_client_begin_load_game(g_client, g_rom_md5,
-				ra_load_game_callback, NULL);
-		} else if (g_login_pending) {
-			// Login still in progress — game will be loaded in login callback
-			RA_LOG("Login in progress, game will load when login completes.");
+			if (g_ra_map && ra_ramread_active(g_ra_map)) {
+				// Already logged in and FPGA mirror active — load immediately
+				RA_LOG("Logged in and FPGA mirror active, loading game by MD5: %s", g_rom_md5);
+				g_game_load_pending = 1;
+				rc_client_begin_load_game(g_client, g_rom_md5,
+					ra_load_game_callback, NULL);
+			} else {
+				// Mirror not yet active — defer until FPGA validated
+				RA_LOG("Logged in but FPGA mirror not active — game load deferred.");
+				g_game_load_deferred = 1;
+			}
+		} else if (g_login_pending || g_login_deferred) {
+			// Login still in progress or deferred — game loads after login
+			RA_LOG("Login pending/deferred, game will load when login completes.");
 		} else {
 			RA_LOG("Not logged in — game identified but achievements unavailable.");
 			RA_LOG("MD5: %s (can verify at retroachievements.org)", g_rom_md5);
@@ -1085,14 +1099,58 @@ void achievements_poll(void)
 	// Check if mirror has become active
 	if (!g_mirror_validated) {
 		if (ra_ramread_active(g_ra_map)) {
-			g_mirror_validated = 1;
-			RA_LOG("=== DDRAM Mirror Activated! ===");
-			ra_ramread_debug_dump(g_ra_map);
+			uint32_t cur_frame = ra_ramread_frame(g_ra_map);
+			if (!g_mirror_confirming) {
+				// First time we see the magic — record frame, wait for it to advance
+				g_mirror_confirming = 1;
+				g_mirror_initial_frame = cur_frame;
+				RA_LOG("DDRAM magic detected (frame=%u), waiting for frame to advance...", cur_frame);
+			} else if (cur_frame != g_mirror_initial_frame) {
+				// Frame advanced — FPGA is alive and adapted
+				g_mirror_confirming = 0;
+				g_mirror_validated = 1;
+				RA_LOG("=== DDRAM Mirror Activated! (frame %u -> %u) ===", g_mirror_initial_frame, cur_frame);
+				ra_ramread_debug_dump(g_ra_map);
 
-			// Detect FPGA protocol — delegate to the active console handler
-			if (g_active_handler && g_active_handler->detect_protocol)
-				g_active_handler->detect_protocol(g_ra_map);
+				// Detect FPGA protocol — returns 1 if adapted, 0 if not supported
+				int fpga_ok = 1;
+				if (g_active_handler && g_active_handler->detect_protocol)
+					fpga_ok = g_active_handler->detect_protocol(g_ra_map);
+
+				if (!fpga_ok) {
+					RA_LOG("FPGA core not adapted for RA — suppressing login/load.");
+					g_login_deferred = 0;
+					g_game_load_deferred = 0;
+					g_active_handler = NULL;
+					return;
+				}
+
+#ifdef HAS_RCHEEVOS
+				// Trigger deferred login now that FPGA is confirmed adapted
+				if (g_login_deferred && g_ra_user[0] && g_ra_password[0]
+						&& !g_login_pending && !g_logged_in) {
+					g_login_deferred = 0;
+					RA_LOG("FPGA validated — starting deferred login for '%s'", g_ra_user);
+					g_login_pending = 1;
+					rc_client_begin_login_with_password(g_client, g_ra_user, g_ra_password,
+						ra_login_callback, NULL);
+				}
+
+				// Trigger deferred game load (mirror reactivated, already logged in)
+				if (g_game_load_deferred && g_logged_in && g_rom_md5[0]
+						&& !g_game_load_pending) {
+					g_game_load_deferred = 0;
+					RA_LOG("FPGA validated — loading deferred game by MD5: %s", g_rom_md5);
+					g_game_load_pending = 1;
+					rc_client_begin_load_game(g_client, g_rom_md5,
+						ra_load_game_callback, NULL);
+				}
+#endif
+			}
+			// else: frame still frozen — stale DDRAM from previous session, keep waiting
 		} else {
+			// Magic disappeared — reset confirming state
+			g_mirror_confirming = 0;
 			// Periodic debug while waiting for FPGA mirror
 			static uint32_t wait_count = 0;
 			if ((++wait_count % 18000) == 1) {
@@ -1223,8 +1281,12 @@ void achievements_unload_game(void)
 
 	g_game_loaded = 0;
 	g_game_load_pending = 0;
+	g_game_load_deferred = 0;
 	g_last_frame = 0;
 	g_mirror_validated = 0;
+	g_mirror_confirming = 0;
+	g_mirror_initial_frame = 0;
+	g_login_deferred = 0;
 	g_rom_md5[0] = '\0';
 	g_rom_path[0] = '\0';
 
@@ -1247,11 +1309,19 @@ void achievements_deinit(void)
 		g_client = NULL;
 		RA_LOG("rc_client destroyed");
 	}
+	// Reset auth state — client destroyed, so login is no longer valid
+	g_logged_in = 0;
+	g_login_pending = 0;
+	g_login_deferred = 0;
 #endif
 
 	ra_http_deinit();
 
 	if (g_ra_map) {
+		// Clear DDRAM magic before unmapping so the next core starts clean
+		uint32_t *magic_ptr = (uint32_t *)g_ra_map;
+		*magic_ptr = 0;
+		RA_LOG("DDRAM magic cleared");
 		ra_ramread_unmap(g_ra_map);
 		g_ra_map = NULL;
 		RA_LOG("DDRAM mirror unmapped");

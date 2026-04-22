@@ -235,13 +235,17 @@ static void psx_set_hardcore(int enabled)
 	ra_log_write("PSX: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
-static void psx_detect_protocol(void *map)
+static int psx_detect_protocol(void *map)
 {
+	if (!ra_ramread_active(map)) {
+		ra_log_write("PSX: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
 	// PSX always uses Option C (no VBlank-gated mode)
 	g_psx_state.optionc = 1;
 	ra_log_write("PSX FPGA protocol: Option C (selective address reading)\n");
 
-	if (map && ra_rtquery_supported(map)) {
+	if (ra_rtquery_supported(map)) {
 		g_psx_rtquery = 1;
 		ra_rtquery_init(map);
 		ra_log_write("PSX: Realtime queries supported (FPGA v2+)\n");
@@ -249,6 +253,7 @@ static void psx_detect_protocol(void *map)
 		g_psx_rtquery = 0;
 		ra_log_write("PSX: Realtime queries NOT supported (FPGA v1)\n");
 	}
+	return 1;
 }
 
 // ---------------------------------------------------------------------------
