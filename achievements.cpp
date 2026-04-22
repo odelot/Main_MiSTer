@@ -23,6 +23,7 @@
 #include "osd.h"
 #include "hardware.h"
 #include "lib/md5/md5.h"
+#include "ra_cdreader_chd.h"
 
 #ifdef HAS_RCHEEVOS
 #include "rc_client.h"
@@ -922,7 +923,7 @@ void achievements_init(void)
 
 #ifdef HAS_RCHEEVOS
 	// Initialize rcheevos hash infrastructure (needed for disc-based consoles)
-	rc_hash_init_default_cdreader();
+	ra_cdreader_chd_register(); // unified reader: CHD + cue/gdi fallback
 	rc_hash_init_custom_filereader(NULL); // use default stdio-based reader
 	rc_hash_init_error_message_callback(ra_hash_message);
 	rc_hash_init_verbose_message_callback(ra_hash_message);
