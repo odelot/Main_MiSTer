@@ -779,16 +779,9 @@ static void ra_login_callback(int result, const char *error_message,
 		const rc_client_user_t *user = rc_client_get_user_info(client);
 		RA_LOG("LOGIN OK: %s (hardcore: %u, softcore: %u)", user->display_name, user->score, user->score_softcore);
 		g_logged_in = 1;
+		// Login popup is shown at game load time, not here
 
-		{
-			char buf[NOTIF_TEXT_MAX];
-			snprintf(buf, sizeof(buf),
-				"RetroAchievements\n\n%s\nHardcore: %u  Softcore: %u",
-				user->display_name, user->score, user->score_softcore);
-			ra_notify(buf, 2500);
-		}
-
-		// If a game MD5 is already available, load it now
+		// FPGA was validated before login completed (login fired from poll), load game now
 		if (g_rom_md5[0] && !g_game_loaded && !g_game_load_pending) {
 			RA_LOG("Game MD5 available, loading game: %s", g_rom_md5);
 			g_game_load_pending = 1;
@@ -819,6 +812,7 @@ static void ra_load_game_callback(int result, const char *error_message,
 		g_game_loaded = 1;
 
 		{
+			// Single combined popup: game title + achievement count + logged-in user
 			char buf[NOTIF_TEXT_MAX];
 			// Count achievements via the list API
 			rc_client_achievement_list_t *list =
@@ -831,14 +825,25 @@ static void ra_load_game_callback(int result, const char *error_message,
 					total += list->buckets[b].num_achievements;
 				rc_client_destroy_achievement_list(list);
 			}
-			if (total > 0) {
+			const rc_client_user_t *user = rc_client_get_user_info(client);
+			if (user && total > 0) {
 				snprintf(buf, sizeof(buf),
-					"%s\n\n%u achievements",
+					"%s\n%u achievements\n\nUser: %s\nScore: (HC:%u SC:%u)",
+					game->title, total,
+					user->display_name, user->score, user->score_softcore);
+			} else if (user) {
+				snprintf(buf, sizeof(buf),
+					"%s\n\nUser: %s\nScore: (HC:%u SC:%u)",
+					game->title,
+					user->display_name, user->score, user->score_softcore);
+			} else if (total > 0) {
+				snprintf(buf, sizeof(buf),
+					"%s\n%u achievements",
 					game->title, total);
 			} else {
 				snprintf(buf, sizeof(buf), "%s", game->title);
 			}
-			ra_notify(buf, 3000);
+			ra_notify(buf, 4000);
 		}
 	} else {
 		RA_LOG("GAME LOAD FAILED: result=%d error=%s", result,
@@ -964,9 +969,9 @@ void achievements_init(void)
 
 	RA_LOG("rc_client created successfully");
 
-	// Begin login if credentials available.
-	// Always defer: all cores require an adapted FPGA bitstream (magic 0x52414348).
-	// If the mirror never activates, login is silently suppressed.
+	// Defer login until FPGA mirror is validated (magic present + frame counter advancing).
+	// This ensures login only fires when an adapted bitstream is actually running.
+	// A non-adapted core never writes the magic, so login is silently suppressed.
 	if (has_creds) {
 		g_login_deferred = 1;
 		RA_LOG("Login deferred until FPGA mirror validated (core: '%s').",
@@ -1136,7 +1141,7 @@ void achievements_poll(void)
 						ra_login_callback, NULL);
 				}
 
-				// Trigger deferred game load (mirror reactivated, already logged in)
+				// Trigger deferred game load (mirror activated, already logged in)
 				if (g_game_load_deferred && g_logged_in && g_rom_md5[0]
 						&& !g_game_load_pending) {
 					g_game_load_deferred = 0;
