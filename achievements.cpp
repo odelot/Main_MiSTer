@@ -36,11 +36,13 @@
 // ---------------------------------------------------------------------------
 
 static FILE *g_logfile = NULL;
+static int g_ra_debug = 0; // forward decl — defined/loaded in ra_load_credentials
 
 #define RA_LOG(fmt, ...) ra_log_impl("RA: " fmt "\n", ##__VA_ARGS__)
 
 void ra_log_write(const char *fmt, ...)
 {
+	if (!g_ra_debug) return;
 	va_list args;
 	va_start(args, fmt);
 	printf("\033[1;35m");
@@ -57,6 +59,7 @@ void ra_log_write(const char *fmt, ...)
 
 static void ra_log_impl(const char *fmt, ...)
 {
+	if (!g_ra_debug) return;
 	va_list args;
 
 	// stdout with color
@@ -501,6 +504,8 @@ static int ra_load_credentials(void)
 			g_hardcore = atoi(val);
 		} else if (!strcasecmp(key, "stall_recovery")) {
 			g_stall_recovery = atoi(val);
+		} else if (!strcasecmp(key, "debug")) {
+			g_ra_debug = atoi(val);
 		}
 	}
 	fclose(f);
@@ -511,9 +516,9 @@ static int ra_load_credentials(void)
 	}
 
 	RA_LOG("Credentials loaded: user=%s password=***(%zu chars)", g_ra_user, strlen(g_ra_password));
-	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d hardcore=%d stall_recovery=%d",
+	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d hardcore=%d stall_recovery=%d debug=%d",
 		g_show_challenge_show_popup, g_show_challenge_hide_popup,
-		g_show_progress_popups, g_show_progress_name, g_hardcore, g_stall_recovery);
+		g_show_progress_popups, g_show_progress_name, g_hardcore, g_stall_recovery, g_ra_debug);
 	return 1;
 }
 
@@ -705,15 +710,15 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 	case RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_UPDATE:
 		{
 			RA_LOG("PROGRESS: %s — %s", event->achievement->title, event->achievement->measured_progress);
-                        // Dump all cached values on progress events for debugging
-                        if (g_ra_map) {
-                                int cnt = ra_snes_addrlist_count();
-                                const uint32_t *addrs = ra_snes_addrlist_addrs();
-                                for (int i = 0; i < cnt; i++) {
-                                        uint8_t v = ra_snes_addrlist_read_cached(g_ra_map, addrs[i]);
-                                        RA_LOG("  COND[%d] addr=0x%05X val=0x%02X", i, addrs[i], v);
-                                }
-                        }
+			// Dump all cached values on progress events
+			if (g_ra_map) {
+				int cnt = ra_snes_addrlist_count();
+				const uint32_t *addrs = ra_snes_addrlist_addrs();
+				for (int i = 0; i < cnt; i++) {
+					uint8_t v = ra_snes_addrlist_read_cached(g_ra_map, addrs[i]);
+					RA_LOG("  COND[%d] addr=0x%05X val=0x%02X", i, addrs[i], v);
+				}
+			}
 			if (g_show_progress_popups &&
 			    !ra_progress_popup_suppressed(event->achievement->id, event->achievement->measured_progress)) {
 				char buf[NOTIF_TEXT_MAX];
