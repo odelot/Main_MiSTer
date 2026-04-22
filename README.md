@@ -97,7 +97,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ### How It Works
 
-1. **Init** — On startup, the ARM binary maps the DDRAM mirror region, starts an HTTP worker thread, loads credentials from `retroachievements.cfg`, and logs in to RetroAchievements.
+1. **Init** — On startup, the ARM binary maps the DDRAM mirror region, starts an HTTP worker thread, and loads credentials from `retroachievements.cfg`. Login to RetroAchievements is **deferred**: it only fires once the FPGA mirror's magic value (`"RACH"`) is detected and its frame counter is seen advancing. This means that loading the **standard community core** (which lacks the RA mirror module) silently suppresses all RA activity — no spurious login or network calls are made.
 2. **Load Game** — When a ROM is selected in the MiSTer menu, the binary computes the ROM's MD5 hash and identifies the game against the RA database.
 3. **Per-Frame Poll** — Every frame (~60 Hz), `achievements_poll()` checks whether the FPGA has written new data. If a new frame is available, it calls `rc_client_do_frame()` from the rcheevos library, which evaluates achievement conditions against the current RAM state.
 4. **Unlock / Notify** — When an achievement triggers, the event handler displays an OSD notification and optionally plays a sound (`/media/fat/achievement.wav`). The unlock is reported to the RA server asynchronously.
