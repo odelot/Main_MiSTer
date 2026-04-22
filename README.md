@@ -47,6 +47,7 @@ The [upstream Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer) binary m
 | `achievements_console_lookup.cpp` | Dispatch table mapping core names to console handlers |
 | `ra_http.cpp / .h` | Async HTTP worker thread that executes RetroAchievements API calls via `curl` |
 | `ra_ramread.cpp / .h` | Reads emulated console RAM from the DDRAM mirror written by the FPGA core |
+| `ra_cdreader_chd.cpp / .h` | Unified CD reader bridge: `.chd` via MiSTer's `libchdr`, `.cue`/`.gdi` via the rcheevos default handler. Registered at startup, enabling CHD disc support for all disc-based consoles (PSX, Mega CD, PCE-CD, NeoGeo CD). |
 | `shmem.cpp / .h` | Thin wrapper around `/dev/mem` + `mmap` for ARM ↔ FPGA shared memory access |
 | `retroachievements.cfg` | User credentials file (username / password) |
 | `lib/rcheevos/` | The [rcheevos](https://github.com/RetroAchievements/rcheevos) library (achievement logic, server protocol) |
