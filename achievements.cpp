@@ -777,14 +777,14 @@ static void ra_login_callback(int result, const char *error_message,
 
 	if (result == RC_OK) {
 		const rc_client_user_t *user = rc_client_get_user_info(client);
-		RA_LOG("LOGIN OK: %s (score: %u)", user->display_name, user->score);
+		RA_LOG("LOGIN OK: %s (hardcore: %u, softcore: %u)", user->display_name, user->score, user->score_softcore);
 		g_logged_in = 1;
 
 		{
 			char buf[NOTIF_TEXT_MAX];
 			snprintf(buf, sizeof(buf),
-				"RetroAchievements\n\n%s\nScore: %u",
-				user->display_name, user->score);
+				"RetroAchievements\n\n%s\nHardcore: %u  Softcore: %u",
+				user->display_name, user->score, user->score_softcore);
 			ra_notify(buf, 2500);
 		}
 
