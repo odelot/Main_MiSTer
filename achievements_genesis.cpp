@@ -170,12 +170,16 @@ static void genesis_set_hardcore(int enabled)
 	ra_log_write("Genesis: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
-static void genesis_detect_protocol(void *map)
+static int genesis_detect_protocol(void *map)
 {
-	(void)map;
+	if (!ra_ramread_active(map)) {
+		ra_log_write("Genesis: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
 	// Genesis always uses Option C (no VBlank-gated mode)
 	g_md_state.optionc = 1;
 	ra_log_write("MegaDrive FPGA protocol: Option C (selective address reading)\n");
+	return 1;
 }
 
 // ---------------------------------------------------------------------------

@@ -281,9 +281,12 @@ user_io_status_set("[5]", enabled ? 1 : 0);
 ra_log_write("TGFX16: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
-static void tgfx16_detect_protocol(void *map)
+static int tgfx16_detect_protocol(void *map)
 {
-if (!map) return;
+if (!ra_ramread_active(map)) {
+	ra_log_write("TGFX16: FPGA mirror not detected -- RA support unavailable\n");
+	return 0;
+}
 const ra_header_t *hdr = (const ra_header_t *)map;
 if (hdr->region_count == 0) {
 g_tgfx16_state.optionc = 1;
@@ -293,6 +296,7 @@ g_tgfx16_state.optionc = 0;
 ra_log_write("TGFX16 FPGA protocol: VBlank-gated mirror (region_count=%d)\n",
 hdr->region_count);
 }
+return 1;
 }
 
 // ---------------------------------------------------------------------------

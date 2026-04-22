@@ -248,9 +248,12 @@ static void snes_set_hardcore(int enabled)
 	ra_log_write("SNES: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
-void snes_detect_protocol(void *map)
+int snes_detect_protocol(void *map)
 {
-	if (!map) return;
+	if (!ra_ramread_active(map)) {
+		ra_log_write("SNES: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
 	const ra_header_t *hdr = (const ra_header_t *)map;
 	if (hdr->region_count == 0) {
 		g_snes_state.optionc = 1;
@@ -260,6 +263,7 @@ void snes_detect_protocol(void *map)
 		ra_log_write("SNES FPGA protocol: VBlank-gated full mirror (region_count=%d)\n",
 			hdr->region_count);
 	}
+	return 1;
 }
 
 // ---------------------------------------------------------------------------

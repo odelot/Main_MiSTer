@@ -42,10 +42,16 @@ static int nes_poll(void *map, void *client, int game_loaded)
 	return 0; // fall through to achievements_poll default path
 }
 
-static void nes_detect_protocol(void *map)
+static int nes_detect_protocol(void *map)
 {
-	(void)map;
-	// NES uses region-based layout; no protocol detection needed
+	if (!ra_ramread_active(map)) {
+		ra_log_write("NES: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
+	const ra_header_t *hdr = (const ra_header_t *)map;
+	ra_log_write("NES: FPGA mirror OK, regions=%u frame=%u\n",
+		hdr->region_count, hdr->frame_counter);
+	return 1;
 }
 
 static int nes_calculate_hash(const char *rom_path, char *md5_hex_out)

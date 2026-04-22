@@ -195,13 +195,18 @@ uint8_t ra_ramread_atari7800_byte(const void *map, uint16_t addr)
 	if (addr >= 0x1800 && addr <= 0x1FFF)
 		return ((const uint8_t *)map + 0x900)[addr & 0x7FF];
 	// ram0: physical 0x2000-0x27FF (main) and zero-page/stack mirrors
-	// Note: requires real BIOS (boot0.rom). Without BIOS, bypass_bios shifts
-	// all game variables -8 in BRAM and inverts game-state semantics,
-	// breaking achievement reset conditions. With real BIOS, direct mapping works.
+	// ProSystem (reference emulator for Atari 7800 achievements) stores game
+	// variables 8 bytes higher in BRAM than our FPGA. The -8 offset compensates.
+	// However, system/BIOS variables in BRAM[0x00-0x7F] map directly (no offset).
+	// Game variables in BRAM[0x80+] need the -8 shift.
+	// Example: RA addr 0x20C4 (bram=0xC4 >=0x80) -> BRAM[0xBC] = hammer timer.
+	//          RA addr 0x205B (bram=0x5B < 0x80) -> BRAM[0x5B] = 0 (no reset).
 	if ((addr >= 0x2000 && addr <= 0x27FF) ||
 	    (addr >= 0x0040 && addr <= 0x00FF) ||
 	    (addr >= 0x0140 && addr <= 0x01FF)) {
-		return ((const uint8_t *)map + 0x100)[addr & 0x7FF];
+		uint16_t bram_idx = addr & 0x7FF;
+		if (bram_idx >= 0x80) bram_idx -= 8;
+		return ((const uint8_t *)map + 0x100)[bram_idx];
 	}
 	return 0;
 }

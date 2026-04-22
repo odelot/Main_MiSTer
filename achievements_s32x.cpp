@@ -170,12 +170,16 @@ user_io_status_set("[24]", enabled ? 1 : 0); // disable save states
 ra_log_write("S32X: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
-static void s32x_detect_protocol(void *map)
+static int s32x_detect_protocol(void *map)
 {
-(void)map;
+        if (!ra_ramread_active(map)) {
+                ra_log_write("S32X: FPGA mirror not detected -- RA support unavailable\n");
+                return 0;
+        }
 // S32X always uses Option C
 g_s32x_state.optionc = 1;
 ra_log_write("S32X FPGA protocol: Option C (selective address reading)\n");
+        return 1;
 }
 
 // ---------------------------------------------------------------------------

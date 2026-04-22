@@ -282,12 +282,16 @@ static void n64_set_hardcore(int enabled)
 		enabled ? "enabled" : "disabled");
 }
 
-static void n64_detect_protocol(void *map)
+static int n64_detect_protocol(void *map)
 {
-	(void)map;
+	if (!ra_ramread_active(map)) {
+		ra_log_write("N64: FPGA mirror not detected -- RA support unavailable\n");
+		return 0;
+	}
 	// N64 always uses Option C
 	g_n64_state.optionc = 1;
 	ra_log_write("N64 FPGA protocol: Option C (selective address reading)\n");
+	return 1;
 }
 
 // ---------------------------------------------------------------------------
