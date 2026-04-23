@@ -650,25 +650,29 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 	switch (event->type) {
 	case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED:
 		{
-			RA_LOG("*** ACHIEVEMENT TRIGGERED: [%u] %s — %s ***",
-				event->achievement->id, event->achievement->title,
-				event->achievement->description);
-			const int title_max = 28;
-			const int desc_max  = 60;
-			char title_buf[32];
-			char desc_buf[64];
-			snprintf(title_buf, title_max + 1, "%s", event->achievement->title);
-			if (strlen(event->achievement->title) > (size_t)title_max)
-				strcat(title_buf, "...");
-			snprintf(desc_buf, desc_max + 1, "%s", event->achievement->description);
-			if (strlen(event->achievement->description) > (size_t)desc_max)
-				strcat(desc_buf, "...");
-			char buf[NOTIF_TEXT_MAX];
-			snprintf(buf, sizeof(buf),
-				">> ACHIEVEMENT <<\n\n%s\n%s",
-				title_buf, desc_buf);
-			ra_notify_urgent(buf, 4000);
-			ra_play_achievement_sound();
+			if (event->achievement->id == 101000001) {
+				ra_notify_urgent("HARDCORE mode DISABLED\nCORE still not supported", 3500);
+			} else {
+				RA_LOG("*** ACHIEVEMENT TRIGGERED: [%u] %s — %s ***",
+					event->achievement->id, event->achievement->title,
+					event->achievement->description);
+				const int title_max = 28;
+				const int desc_max  = 60;
+				char title_buf[32];
+				char desc_buf[64];
+				snprintf(title_buf, title_max + 1, "%s", event->achievement->title);
+				if (strlen(event->achievement->title) > (size_t)title_max)
+					strcat(title_buf, "...");
+				snprintf(desc_buf, desc_max + 1, "%s", event->achievement->description);
+				if (strlen(event->achievement->description) > (size_t)desc_max)
+					strcat(desc_buf, "...");
+				char buf[NOTIF_TEXT_MAX];
+				snprintf(buf, sizeof(buf),
+					">> ACHIEVEMENT <<\n\n%s\n%s",
+					title_buf, desc_buf);
+				ra_notify_urgent(buf, 4000);
+				ra_play_achievement_sound();
+			}
 		}
 		break;
 
@@ -832,24 +836,29 @@ static void ra_load_game_callback(int result, const char *error_message,
 				rc_client_destroy_achievement_list(list);
 			}
 			const rc_client_user_t *user = rc_client_get_user_info(client);
-			if (user && total > 0) {
-				snprintf(buf, sizeof(buf),
-					"%s\n%u achievements\n\nUser: %s\nScore: (HC:%u SC:%u)",
-					game->title, total,
-					user->display_name, user->score, user->score_softcore);
-			} else if (user) {
-				snprintf(buf, sizeof(buf),
-					"%s\n\nUser: %s\nScore: (HC:%u SC:%u)",
-					game->title,
-					user->display_name, user->score, user->score_softcore);
-			} else if (total > 0) {
+			int hardcore_enabled = rc_client_get_hardcore_enabled(client);
+			if (total > 0) {
 				snprintf(buf, sizeof(buf),
 					"%s\n%u achievements",
 					game->title, total);
 			} else {
-				snprintf(buf, sizeof(buf), "%s", game->title);
+				snprintf(buf, sizeof(buf),
+					"%s\n No achievements",
+					game->title);
 			}
-			ra_notify(buf, 4000);
+			ra_notify_urgent(buf, 2000);
+			if (user) {
+				snprintf(buf, sizeof(buf),
+					"%s\n(HC:%u SC:%u)",					
+					user->display_name, user->score, user->score_softcore);
+				ra_notify_urgent(buf, 2000);
+			}
+			
+			hardcore_enabled = rc_client_get_hardcore_enabled(client);
+			if (hardcore_enabled) {
+				RA_LOG("HARDCORE mode ENABLED!");		
+				ra_notify_urgent("HARDCORE mode ENABLED!", 2000);
+			}
 		}
 	} else {
 		RA_LOG("GAME LOAD FAILED: result=%d error=%s", result,
@@ -1226,7 +1235,7 @@ void achievements_poll(void)
 	if (g_first_frame == 0) {
 		g_first_frame = frame;
 		RA_LOG("First frame received: %u", frame);
-		ra_ramread_debug_dump(g_ra_map);
+		ra_ramread_debug_dump(g_ra_map);		
 	}
 
 	// Frame delta check (detect missed frames)
