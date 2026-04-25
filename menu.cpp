@@ -2510,7 +2510,7 @@ void HandleUI(void)
 											opt = "[0]";
 										}
 									}
-
+									if (!bit) achievements_notify_core_reset();
 									if (is_pce() && !bit) pcecd_reset();
 									if (is_saturn() && !bit) saturn_reset();
 									if (is_n64() && !bit) n64_reset();

@@ -189,6 +189,7 @@ static int g_show_challenge_show_popup = 1; // 1 = show popup on challenge SHOW 
 static int g_show_challenge_hide_popup = 1; // 1 = show popup on challenge HIDE event
 static int g_show_progress_popups      = 1; // 1 = show progress indicator popups
 static int g_show_progress_name        = 1; // 1 = include achievement name in progress popup
+static int g_leaderboards_enabled      = 1; // 1 = handle leaderboard events and tracker popups
 static int g_hardcore                  = 0; // 1 = hardcore mode (disables cheats & save states)
 static int g_stall_recovery            = 0; // 1 = enable OptionC stall recovery (disabled by default)
 static char g_ua_clause[64]            = ""; // rcheevos user-agent clause (e.g. "rcheevos/11.6")
@@ -507,7 +508,10 @@ static int ra_load_credentials(void)
 		} else if (!strcasecmp(key, "show_progress_popups")) {
 			g_show_progress_popups = atoi(val);
 		} else if (!strcasecmp(key, "show_progress_name")) {
-			g_show_progress_name = atoi(val);
+                        g_show_progress_name = atoi(val);
+		} else if (!strcasecmp(key, "leaderboards-enabled") ||
+					!strcasecmp(key, "leaderboards_enabled")) {
+				g_leaderboards_enabled = atoi(val);
 		} else if (!strcasecmp(key, "hardcore")) {
 			g_hardcore = atoi(val);
 		} else if (!strcasecmp(key, "stall_recovery")) {
@@ -524,9 +528,10 @@ static int ra_load_credentials(void)
 	}
 
 	RA_LOG("Credentials loaded: user=%s password=***(%zu chars)", g_ra_user, strlen(g_ra_password));
-	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d hardcore=%d stall_recovery=%d debug=%d",
-		g_show_challenge_show_popup, g_show_challenge_hide_popup,
-		g_show_progress_popups, g_show_progress_name, g_hardcore, g_stall_recovery, g_ra_debug);
+	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d leaderboards_enabled=%d hardcore=%d stall_recovery=%d debug=%d",
+                g_show_challenge_show_popup, g_show_challenge_hide_popup,
+                g_show_progress_popups, g_show_progress_name, g_leaderboards_enabled,
+                g_hardcore, g_stall_recovery, g_ra_debug);
 	return 1;
 }
 
@@ -653,7 +658,7 @@ static void ra_server_call(const rc_api_request_t *request,
 static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client)
 {
 	(void)client;
-
+	RA_LOG("Event: type=%d", event->type);
 	switch (event->type) {
 	case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED:
 		{
@@ -751,7 +756,123 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 		}
 		break;
 
-	case RC_CLIENT_EVENT_GAME_COMPLETED:
+        case RC_CLIENT_EVENT_LEADERBOARD_STARTED:
+                {
+                        if (!g_leaderboards_enabled || !event->leaderboard)
+                                break;
+
+                        RA_LOG("LEADERBOARD STARTED: [%u] %s",
+                                event->leaderboard->id, event->leaderboard->title);
+
+                        const int title_max = 28;
+                        char title_buf[32];
+                        snprintf(title_buf, title_max + 1, "%s", event->leaderboard->title);
+                        if (strlen(event->leaderboard->title) > (size_t)title_max)
+                                strcat(title_buf, "...");
+
+                        char buf[NOTIF_TEXT_MAX];
+                        snprintf(buf, sizeof(buf), "LEADERBOARD START\n\n%s", title_buf);
+                        ra_notify(buf, 2500);
+                }
+                break;
+
+        case RC_CLIENT_EVENT_LEADERBOARD_FAILED:
+                {
+                        if (!g_leaderboards_enabled || !event->leaderboard)
+                                break;
+
+                        RA_LOG("LEADERBOARD FAILED: [%u] %s",
+                                event->leaderboard->id, event->leaderboard->title);
+
+                        const int title_max = 28;
+                        char title_buf[32];
+                        snprintf(title_buf, title_max + 1, "%s", event->leaderboard->title);
+                        if (strlen(event->leaderboard->title) > (size_t)title_max)
+                                strcat(title_buf, "...");
+
+                        char buf[NOTIF_TEXT_MAX];
+                        snprintf(buf, sizeof(buf), "LEADERBOARD FAILED\n\n%s", title_buf);
+                        ra_notify(buf, 2500);
+                }
+                break;
+
+        case RC_CLIENT_EVENT_LEADERBOARD_SUBMITTED:
+                {
+                        if (!g_leaderboards_enabled || !event->leaderboard)
+                                break;
+
+                        RA_LOG("LEADERBOARD SUBMITTED: [%u] %s",
+                                event->leaderboard->id, event->leaderboard->title);
+
+                        const int title_max = 28;
+                        char title_buf[32];
+                        char value_buf[RC_CLIENT_LEADERBOARD_DISPLAY_SIZE] = "-";
+                        snprintf(title_buf, title_max + 1, "%s", event->leaderboard->title);
+                        if (strlen(event->leaderboard->title) > (size_t)title_max)
+                                strcat(title_buf, "...");
+
+                        if (event->leaderboard->tracker_value && event->leaderboard->tracker_value[0])
+                                snprintf(value_buf, sizeof(value_buf), "%s", event->leaderboard->tracker_value);
+
+                        char buf[NOTIF_TEXT_MAX];
+                        snprintf(buf, sizeof(buf), "LEADERBOARD SUBMITTED\n\n%s\nScore: %s",
+                                title_buf, value_buf);
+                        ra_notify_urgent(buf, 3500);
+                }
+                break;
+
+        case RC_CLIENT_EVENT_LEADERBOARD_TRACKER_SHOW:
+        case RC_CLIENT_EVENT_LEADERBOARD_TRACKER_UPDATE:
+                {
+                        if (!g_leaderboards_enabled || !event->leaderboard_tracker)
+                                break;
+
+                        RA_LOG("LEADERBOARD TRACKER: id=%u value=%s",
+                                event->leaderboard_tracker->id,
+                                event->leaderboard_tracker->display);
+
+                        char buf[NOTIF_TEXT_MAX];
+                        snprintf(buf, sizeof(buf), "LB #%u\n%s",
+                                event->leaderboard_tracker->id,
+                                event->leaderboard_tracker->display);
+                        ra_notify_progress(buf);
+                }
+                break;
+
+        case RC_CLIENT_EVENT_LEADERBOARD_TRACKER_HIDE:
+                {
+                        if (!g_leaderboards_enabled || !event->leaderboard_tracker)
+                                break;
+
+                        RA_LOG("LEADERBOARD TRACKER HIDE: id=%u",
+                                event->leaderboard_tracker->id);
+                }
+                break;
+
+        case RC_CLIENT_EVENT_LEADERBOARD_SCOREBOARD:
+                {
+                        if (!g_leaderboards_enabled || !event->leaderboard_scoreboard)
+                                break;
+
+                        RA_LOG("LEADERBOARD SCOREBOARD: id=%u submitted=%s best=%s rank=%u entries=%u",
+                                event->leaderboard_scoreboard->leaderboard_id,
+                                event->leaderboard_scoreboard->submitted_score,
+                                event->leaderboard_scoreboard->best_score,
+                                event->leaderboard_scoreboard->new_rank,
+                                event->leaderboard_scoreboard->num_entries);
+
+                        char buf[NOTIF_TEXT_MAX];
+                        snprintf(buf, sizeof(buf),
+                                "LEADERBOARD RESULT\n\nRank: #%u/%u\nSubmitted: %s\nBest: %s",
+                                event->leaderboard_scoreboard->new_rank,
+                                event->leaderboard_scoreboard->num_entries,
+                                event->leaderboard_scoreboard->submitted_score,
+                                event->leaderboard_scoreboard->best_score);
+                        ra_notify_urgent(buf, 4000);
+                }
+                break;
+
+        case RC_CLIENT_EVENT_GAME_COMPLETED:
 		RA_LOG("*** GAME COMPLETED! ***");
 		ra_notify_urgent("** GAME COMPLETED! **\n\nCongratulations!", 5000);
 		ra_play_achievement_sound();
@@ -1361,36 +1482,67 @@ void achievements_poll(void)
 
 void achievements_unload_game(void)
 {
-	if (!g_active_handler) return;
+        if (!g_active_handler) return;
 
-	RA_LOG("--- Game Unload ---");
-	RA_LOG("Stats: %u frames processed, %u skipped", g_frames_processed, g_frames_skipped);
+        RA_LOG("--- Game Unload ---");
+        RA_LOG("Stats: %u frames processed, %u skipped", g_frames_processed, g_frames_skipped);
 
 #ifdef HAS_RCHEEVOS
-	if (g_client) {
-		rc_client_unload_game(g_client);
-	}
+        if (g_client) {
+                rc_client_unload_game(g_client);
+        }
 #endif
 
-	g_active_handler->reset();
-	ra_snes_addrlist_init();
+        g_active_handler->reset();
+        ra_snes_addrlist_init();
 
-	g_game_loaded = 0;
-	g_game_load_pending = 0;
-	g_game_load_deferred = 0;
-	g_last_frame = 0;
-	g_mirror_validated = 0;
-	g_mirror_confirming = 0;
-	g_mirror_initial_frame = 0;
-	g_login_deferred = 0;
-	g_rom_md5[0] = '\0';
-	g_rom_path[0] = '\0';
+        g_game_loaded = 0;
+        g_game_load_pending = 0;
+        g_game_load_deferred = 0;
+        g_last_frame = 0;
+        g_mirror_validated = 0;
+        g_mirror_confirming = 0;
+        g_mirror_initial_frame = 0;
+        g_login_deferred = 0;
+        g_rom_md5[0] = 0;
+        g_rom_path[0] = 0;
 
-	// Clear pending notifications
-	s_urgent_head = s_urgent_tail = 0;
-	s_urgent_showing  = 0;
-	s_instant_pending = 0;
-	s_instant_showing = 0;
+        // Clear pending notifications
+        s_urgent_head = s_urgent_tail = 0;
+        s_urgent_showing  = 0;
+        s_instant_pending = 0;
+        s_instant_showing = 0;
+}
+
+void achievements_notify_core_reset(void)
+{
+        if (!g_active_handler) return;
+
+        RA_LOG("--- Core Reset ---");
+
+#ifdef HAS_RCHEEVOS
+        if (g_client && g_game_loaded) {
+                rc_client_reset(g_client);
+                RA_LOG("rc_client_reset notified");
+        }
+#endif
+
+        // Keep the loaded game, but restart runtime/frame tracking state.
+        g_last_frame = 0;
+        g_first_frame = 0;
+        g_frames_processed = 0;
+        g_frames_skipped = 0;
+        g_load_time = time(NULL);
+        g_ach_state_count = 0;
+
+        g_active_handler->reset();
+        ra_snes_addrlist_init();
+
+        // Drop stale queued notifications across reset boundaries.
+        s_urgent_head = s_urgent_tail = 0;
+        s_urgent_showing  = 0;
+        s_instant_pending = 0;
+        s_instant_showing = 0;
 }
 
 void achievements_deinit(void)
