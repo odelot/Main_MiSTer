@@ -12,6 +12,12 @@
 #include <pthread.h>
 #include <signal.h>
 #include <execinfo.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netdb.h>
 
 #include "achievements.h"
 #include "achievements_console.h"
@@ -154,6 +160,7 @@ static rc_client_t *g_client = NULL;
 // Credentials
 static char g_ra_user[128] = {};
 static char g_ra_password[128] = {};
+static int g_has_credentials = 0;
 static int g_logged_in = 0;
 static int g_login_pending = 0;
 static int g_game_load_pending = 0;
@@ -791,13 +798,18 @@ static void ra_login_callback(int result, const char *error_message,
 		g_logged_in = 1;
 		// Login popup is shown at game load time, not here
 
-		// FPGA was validated before login completed (login fired from poll), load game now
-		if (g_rom_md5[0] && !g_game_loaded && !g_game_load_pending) {
-			RA_LOG("Game MD5 available, loading game: %s", g_rom_md5);
-			g_game_load_pending = 1;
-			rc_client_begin_load_game(g_client, g_rom_md5,
-				ra_load_game_callback, NULL);
-		}
+                // Login now happens on demand during game load. Only identify once mirror is active.
+                if (g_rom_md5[0] && !g_game_loaded && !g_game_load_pending) {
+                        if (g_ra_map && ra_ramread_active(g_ra_map)) {
+                                RA_LOG("Game MD5 available, loading game: %s", g_rom_md5);
+                                g_game_load_pending = 1;
+                                rc_client_begin_load_game(g_client, g_rom_md5,
+                                        ra_load_game_callback, NULL);
+                        } else {
+                                RA_LOG("Login OK but mirror not active yet, deferring game identify.");
+                                g_game_load_deferred = 1;
+                        }
+                }
 	} else {
 		RA_LOG("LOGIN FAILED: result=%d error=%s", result,
 			error_message ? error_message : "(none)");
@@ -837,6 +849,12 @@ static void ra_load_game_callback(int result, const char *error_message,
 			}
 			const rc_client_user_t *user = rc_client_get_user_info(client);
 			int hardcore_enabled = rc_client_get_hardcore_enabled(client);
+			if (user) {
+				snprintf(buf, sizeof(buf),
+					"%s\n(HC:%u SC:%u)",					
+					user->display_name, user->score, user->score_softcore);
+				ra_notify_urgent(buf, 2000);
+			}
 			if (total > 0) {
 				snprintf(buf, sizeof(buf),
 					"%s\n%u achievements",
@@ -847,12 +865,6 @@ static void ra_load_game_callback(int result, const char *error_message,
 					game->title);
 			}
 			ra_notify_urgent(buf, 2000);
-			if (user) {
-				snprintf(buf, sizeof(buf),
-					"%s\n(HC:%u SC:%u)",					
-					user->display_name, user->score, user->score_softcore);
-				ra_notify_urgent(buf, 2000);
-			}
 			
 			hardcore_enabled = rc_client_get_hardcore_enabled(client);
 			if (hardcore_enabled) {
@@ -886,6 +898,70 @@ static int ra_core_supported(void)
 {
 	return g_active_handler != NULL;
 }
+
+#ifdef HAS_RCHEEVOS
+static int ra_has_internet_connectivity(void)
+{
+        struct addrinfo hints;
+        struct addrinfo *res = NULL;
+        int connected = 0;
+
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        if (getaddrinfo("retroachievements.org", "80", &hints, &res) != 0 || !res) {
+                RA_LOG("Internet check failed: DNS resolution for retroachievements.org");
+                return 0;
+        }
+
+        for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+                int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+                if (fd < 0)
+                        continue;
+
+                int flags = fcntl(fd, F_GETFL, 0);
+                if (flags >= 0)
+                        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+                int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
+                if (rc == 0) {
+                        connected = 1;
+                        close(fd);
+                        break;
+                }
+
+                if (rc < 0 && errno == EINPROGRESS) {
+                        fd_set wfds;
+                        FD_ZERO(&wfds);
+                        FD_SET(fd, &wfds);
+                        struct timeval tv;
+                        tv.tv_sec = 0;
+                        tv.tv_usec = 500000;
+
+                        int sel = select(fd + 1, NULL, &wfds, NULL, &tv);
+                        if (sel > 0 && FD_ISSET(fd, &wfds)) {
+                                int so_error = 0;
+                                socklen_t slen = sizeof(so_error);
+                                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &slen) == 0 && so_error == 0)
+                                        connected = 1;
+                        }
+                }
+
+                close(fd);
+                if (connected)
+                        break;
+        }
+
+        freeaddrinfo(res);
+        return connected;
+}
+
+static void ra_show_no_internet_popup(void)
+{
+        ra_notify("RetroAchievements\n\nNo internet detected!\nTry again once you connected", 3000);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -984,14 +1060,11 @@ void achievements_init(void)
 
 	RA_LOG("rc_client created successfully");
 
-	// Defer login until FPGA mirror is validated (magic present + frame counter advancing).
-	// This ensures login only fires when an adapted bitstream is actually running.
-	// A non-adapted core never writes the magic, so login is silently suppressed.
-	if (has_creds) {
-		g_login_deferred = 1;
-		RA_LOG("Login deferred until FPGA mirror validated (core: '%s').",
-			g_active_handler ? g_active_handler->name : "none");
-	} else {
+	// Login is attempted on-demand in achievements_load_game, right before identify.
+        g_has_credentials = has_creds;
+        if (g_has_credentials) {
+                RA_LOG("Credentials loaded. Login will happen on demand before game identify.");
+        } else {
 		RA_LOG("No credentials — running in monitor-only mode.");
 		RA_LOG("Create %s to enable RetroAchievements.", RA_CFG_PATH);
 	}
@@ -1004,87 +1077,100 @@ void achievements_init(void)
 
 void achievements_load_game(const char *rom_path, uint32_t crc32)
 {
-	if (!g_active_handler) return;
+        if (!g_active_handler) return;
 
-	// Update User-Agent with core-specific prefix (e.g. "NES_MiSTer/1.0 rcheevos/11.6")
-	if (g_ua_clause[0]) {
-		const char *core_name = user_io_get_core_name(1);
-		char ua[128];
-		if (core_name && core_name[0])
-			snprintf(ua, sizeof(ua), "%s_MiSTer/1.0 %s", core_name, g_ua_clause);
-		else
-			snprintf(ua, sizeof(ua), "MiSTer/1.0 %s", g_ua_clause);
-		ra_http_set_user_agent(ua);
-		RA_LOG("User-Agent updated: %s", ua);
-	}
+        // Update User-Agent with core-specific prefix (e.g. "NES_MiSTer/1.0 rcheevos/11.6")
+        if (g_ua_clause[0]) {
+                const char *core_name = user_io_get_core_name(1);
+                char ua[128];
+                if (core_name && core_name[0])
+                        snprintf(ua, sizeof(ua), "%s_MiSTer/1.0 %s", core_name, g_ua_clause);
+                else
+                        snprintf(ua, sizeof(ua), "MiSTer/1.0 %s", g_ua_clause);
+                ra_http_set_user_agent(ua);
+                RA_LOG("User-Agent updated: %s", ua);
+        }
 
-	RA_LOG("--- Game Load ---");
-	RA_LOG("ROM path: %s", rom_path);
-	RA_LOG("CRC32: %08X", crc32);
+        RA_LOG("--- Game Load ---");
+        RA_LOG("ROM path: %s", rom_path);
+        RA_LOG("CRC32: %08X", crc32);
 
-	// Store ROM path
-	snprintf(g_rom_path, sizeof(g_rom_path), "%s", rom_path);
+        // Store ROM path
+        snprintf(g_rom_path, sizeof(g_rom_path), "%s", rom_path);
 
-	// Calculate hash — try handler first, fall back to generic MD5
-	g_rom_md5[0] = '\0';
-	if (rom_path && rom_path[0]) {
-		if (!g_active_handler->calculate_hash(rom_path, g_rom_md5)) {
-			ra_calculate_rom_md5(rom_path, g_rom_md5);
-		}
-	}
+        // Calculate hash — try handler first, fall back to generic MD5
+        g_rom_md5[0] = '\0';
+        if (rom_path && rom_path[0]) {
+                if (!g_active_handler->calculate_hash(rom_path, g_rom_md5)) {
+                        ra_calculate_rom_md5(rom_path, g_rom_md5);
+                }
+        }
 
-	// Reset frame tracking and console state
-	g_last_frame = 0;
-	g_first_frame = 0;
-	g_mirror_validated = 0;
-	g_mirror_confirming = 0;
-	g_mirror_initial_frame = 0;
-	g_game_load_deferred = 0;
-	g_frames_processed = 0;
-	g_frames_skipped = 0;
-	g_game_loaded = 0;
-	g_load_time = time(NULL);
-	g_ach_state_count = 0;
-	g_active_handler->reset();
-	ra_snes_addrlist_init();
+        // Reset frame tracking and console state
+        g_last_frame = 0;
+        g_first_frame = 0;
+        g_mirror_validated = 0;
+        g_mirror_confirming = 0;
+        g_mirror_initial_frame = 0;
+        g_game_load_deferred = 0;
+        g_frames_processed = 0;
+        g_frames_skipped = 0;
+        g_game_loaded = 0;
+        g_load_time = time(NULL);
+        g_ach_state_count = 0;
+        g_active_handler->reset();
+        ra_snes_addrlist_init();
 
-	// Check mirror state
-	if (g_ra_map && ra_ramread_active(g_ra_map)) {
-		RA_LOG("Mirror active at game load time. Dumping:");
-		ra_ramread_debug_dump(g_ra_map);
-	}
+        // Check mirror state
+        if (g_ra_map && ra_ramread_active(g_ra_map)) {
+                RA_LOG("Mirror active at game load time. Dumping:");
+                ra_ramread_debug_dump(g_ra_map);
+        }
 
 #ifdef HAS_RCHEEVOS
-	if (g_client && g_rom_md5[0]) {
-		if (g_logged_in && !g_game_load_pending) {
-			if (g_ra_map && ra_ramread_active(g_ra_map)) {
-				// Already logged in and FPGA mirror active — load immediately
-				RA_LOG("Logged in and FPGA mirror active, loading game by MD5: %s", g_rom_md5);
-				g_game_load_pending = 1;
-				rc_client_begin_load_game(g_client, g_rom_md5,
-					ra_load_game_callback, NULL);
-			} else {
-				// Mirror not yet active — defer until FPGA validated
-				RA_LOG("Logged in but FPGA mirror not active — game load deferred.");
-				g_game_load_deferred = 1;
-			}
-		} else if (g_login_pending || g_login_deferred) {
-			// Login still in progress or deferred — game loads after login
-			RA_LOG("Login pending/deferred, game will load when login completes.");
-		} else {
-			RA_LOG("Not logged in — game identified but achievements unavailable.");
-			RA_LOG("MD5: %s (can verify at retroachievements.org)", g_rom_md5);
-		}
-	}
+        if (g_client && g_rom_md5[0]) {
+                if (!g_logged_in && !g_login_pending && g_has_credentials) {
+                        if (!ra_has_internet_connectivity()) {
+                                RA_LOG("No internet connectivity, skipping RA login for now.");
+                                ra_show_no_internet_popup();
+                                g_login_deferred = 1;
+                        } else {
+                                RA_LOG("Starting RA login for '%s' before game identify.", g_ra_user);
+                                g_login_deferred = 0;
+                                g_login_pending = 1;
+                                g_game_load_deferred = 1;
+                                rc_client_begin_login_with_password(g_client, g_ra_user, g_ra_password,
+                                        ra_login_callback, NULL);
+                        }
+                } else if (g_logged_in && !g_game_load_pending) {
+                        if (g_ra_map && ra_ramread_active(g_ra_map)) {
+                                // Already logged in and FPGA mirror active — load immediately
+                                RA_LOG("Logged in and FPGA mirror active, loading game by MD5: %s", g_rom_md5);
+                                g_game_load_pending = 1;
+                                rc_client_begin_load_game(g_client, g_rom_md5,
+                                        ra_load_game_callback, NULL);
+                        } else {
+                                // Mirror not yet active — defer until FPGA validated
+                                RA_LOG("Logged in but FPGA mirror not active — game load deferred.");
+                                g_game_load_deferred = 1;
+                        }
+                } else if (g_login_pending || g_login_deferred) {
+                        // Login still in progress or deferred — game loads after login
+                        RA_LOG("Login pending/deferred, game will load when login completes.");
+                } else {
+                        RA_LOG("Not logged in — game identified but achievements unavailable.");
+                        RA_LOG("MD5: %s (can verify at retroachievements.org)", g_rom_md5);
+                }
+        }
 #endif
 
-	RA_LOG("--- Game Load Complete, monitoring frames ---");
+        RA_LOG("--- Game Load Complete, monitoring frames ---");
 
-	// Hardcore mode: let handler set console-specific FPGA bits
-	if (g_hardcore && g_active_handler->set_hardcore) {
-		g_active_handler->set_hardcore(1);
-		RA_LOG("Hardcore: FPGA bits applied for %s", g_active_handler->name);
-	}
+        // Hardcore mode: let handler set console-specific FPGA bits
+        if (g_hardcore && g_active_handler->set_hardcore) {
+                g_active_handler->set_hardcore(1);
+                RA_LOG("Hardcore: FPGA bits applied for %s", g_active_handler->name);
+        }
 }
 
 void achievements_poll(void)
@@ -1146,17 +1232,7 @@ void achievements_poll(void)
 				}
 
 #ifdef HAS_RCHEEVOS
-				// Trigger deferred login now that FPGA is confirmed adapted
-				if (g_login_deferred && g_ra_user[0] && g_ra_password[0]
-						&& !g_login_pending && !g_logged_in) {
-					g_login_deferred = 0;
-					RA_LOG("FPGA validated — starting deferred login for '%s'", g_ra_user);
-					g_login_pending = 1;
-					rc_client_begin_login_with_password(g_client, g_ra_user, g_ra_password,
-						ra_login_callback, NULL);
-				}
-
-				// Trigger deferred game load (mirror activated, already logged in)
+                                // Trigger deferred game load (mirror activated, already logged in)
 				if (g_game_load_deferred && g_logged_in && g_rom_md5[0]
 						&& !g_game_load_pending) {
 					g_game_load_deferred = 0;
@@ -1368,11 +1444,18 @@ int achievements_stall_recovery_enabled(void)
 void achievements_info(void)
 {
 	if (!ra_core_supported()) {
-		Info("RetroAchievements\n\nCore not supported", 2000, 0, 0, 1);
-		return;
-	}
+                Info("RetroAchievements\n\nCore not supported", 2000, 0, 0, 1);
+                return;
+        }
 
-	char buf[NOTIF_TEXT_MAX];
+#ifdef HAS_RCHEEVOS
+        if (!ra_has_internet_connectivity()) {
+                Info("RetroAchievements\n\nSem internet\nConecte a rede para o RA funcionar", 2500, 0, 0, 1);
+                return;
+        }
+#endif
+
+        char buf[NOTIF_TEXT_MAX];
 	int off = 0;
 	int remain = sizeof(buf);
 
