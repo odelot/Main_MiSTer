@@ -39,6 +39,7 @@
 #include "frame_timer.h"
 #include "scaler.h"
 #include "support.h"
+#include "achievements.h"
 
 static char core_path[1024] = {};
 static char rbf_path[1024] = {};
@@ -3008,7 +3009,8 @@ int user_io_get_kbd_reset()
 
 void user_io_set_kbd_reset(int reset)
 {
-	kbd_reset_ovr = reset;
+        if (reset && !kbd_reset_ovr && !kbd_reset) achievements_notify_core_reset();
+        kbd_reset_ovr = reset;
 }
 
 void user_io_set_ini(int ini_num)
@@ -4051,35 +4053,39 @@ LCTRL LSHIFT LALT LGUI RCTRL RSHIFT RALT RGUI
 
 void user_io_check_reset(unsigned short modifiers, char useKeys)
 {
-	unsigned short combo[] =
-	{
-		0x45,  // lctrl+lalt+ralt
-		0x89,  // lctrl+lgui+rgui
-		0x105, // lctrl+lalt+del
-	};
+        unsigned short combo[] =
+        {
+                0x45,  // lctrl+lalt+ralt
+                0x89,  // lctrl+lgui+rgui
+                0x105, // lctrl+lalt+del
+        };
 
-	if (useKeys >= (sizeof(combo) / sizeof(combo[0]))) useKeys = 0;
+        if (useKeys >= (sizeof(combo) / sizeof(combo[0]))) useKeys = 0;
 
-	if ((modifiers & ~2) == combo[(uint)useKeys])
-	{
-		if (modifiers & 2) // with lshift - cold reset
-		{
-			coldreset_req = 1;
-		}
-		else
-		switch (core_type)
-		{
-		case CORE_TYPE_8BIT:
-			if(is_minimig()) minimig_reset();
-			else kbd_reset = 1;
-			break;
-		}
-	}
-	else
-	{
-		coldreset_req = 0;
-		kbd_reset = 0;
-	}
+        if ((modifiers & ~2) == combo[(uint)useKeys])
+        {
+                if (modifiers & 2) // with lshift - cold reset
+                {
+                        if (!coldreset_req) achievements_notify_core_reset();
+                        coldreset_req = 1;
+                }
+                else
+                switch (core_type)
+                {
+                case CORE_TYPE_8BIT:
+                        if(is_minimig()) minimig_reset();
+                        else {
+                                if (!kbd_reset) achievements_notify_core_reset();
+                                kbd_reset = 1;
+                        }
+                        break;
+                }
+        }
+        else
+        {
+                coldreset_req = 0;
+                kbd_reset = 0;
+        }
 }
 
 void user_io_osd_key_enable(char on)

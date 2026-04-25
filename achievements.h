@@ -30,6 +30,9 @@ void achievements_poll(void);
 // Unload current game (e.g., before loading a new one or switching cores).
 void achievements_unload_game(void);
 
+// Notify RA runtime that an in-core reset happened (without unloading the game).
+void achievements_notify_core_reset(void);
+
 // Shutdown. Frees all resources.
 void achievements_deinit(void);
 
