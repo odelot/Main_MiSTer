@@ -153,7 +153,9 @@ static int gba_poll(void *map, void *client, int game_loaded)
                         }
 
                         // Re-collect every ~5 min
-                        int re_collect = (g_gba_state.game_frames % 18000 == 0) && (g_gba_state.game_frames > 0);
+                        // Smart cache mode: skip re-collect (no dynamic pointers in GBA)
+                        int re_collect = !achievements_smart_cache_enabled()
+                                && (g_gba_state.game_frames % 18000 == 0) && (g_gba_state.game_frames > 0);
                         if (re_collect) {
                                 g_gba_state.collecting = 1;
                                 ra_snes_addrlist_begin_collect();
@@ -218,9 +220,9 @@ static int gba_calculate_hash(const char *rom_path, char *md5_hex_out)
 
 static void gba_set_hardcore(int enabled)
 {
-        // GBA: disable cheats and save states in hardcore mode
-        // TODO: verify correct status bit indices for GBA core
-        ra_log_write("GBA: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
+	user_io_status_set("[44]", enabled ? 1 : 0); // hardcore signal
+	user_io_status_set("[6]",  enabled ? 1 : 0); // disable cheats OSD toggle
+	ra_log_write("GBA: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
 // ---------------------------------------------------------------------------
@@ -291,5 +293,6 @@ const console_handler_t g_console_gba = {
         .set_hardcore = gba_set_hardcore,
         .detect_protocol = gba_detect_protocol,
         .console_id = 5,  // RC_CONSOLE_GAME_BOY_ADVANCE
-        .name = "GBA"
+        .name = "GBA",
+        .hardcore_protected = 1
 };

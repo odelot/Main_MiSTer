@@ -56,7 +56,7 @@ static int nes_detect_protocol(void *map)
 
 static int nes_calculate_hash(const char *rom_path, char *md5_hex_out)
 {
-	// NES requires special handling: skip iNES header + optional trainer
+	// Fallback manual hashing
 	FILE *f = fopen(rom_path, "rb");
 	if (!f) {
 		ra_log_write("NES: Failed to open ROM for hashing: %s\n", rom_path);
@@ -99,6 +99,14 @@ static int nes_calculate_hash(const char *rom_path, char *md5_hex_out)
 			skip, (rom_data[6] & 0x04) ? 1 : 0);
 		hash_data = rom_data + skip;
 		hash_size = file_size - skip;
+	}
+	// FDS: skip fwNES FDS header ("FDS\x1a")
+	else if (file_size > 16 &&
+		rom_data[0] == 0x46 && rom_data[1] == 0x44 &&  // 'F' 'D'
+		rom_data[2] == 0x53 && rom_data[3] == 0x1A) {  // 'S' 0x1a
+		ra_log_write("NES: FDS header detected, skipping 16 bytes\n");
+		hash_data = rom_data + 16;
+		hash_size = file_size - 16;
 	}
 
 	// Calculate MD5
@@ -143,5 +151,19 @@ const console_handler_t g_console_nes = {
 	.set_hardcore = nes_set_hardcore,
 	.detect_protocol = nes_detect_protocol,
 	.console_id = 7,  // RC_CONSOLE_NINTENDO
-	.name = "NES"
+	.name = "NES",
+	.hardcore_protected = 1
+};
+
+const console_handler_t g_console_fds = {
+	.init = nes_init,
+	.reset = nes_reset,
+	.read_memory = nes_read_memory,
+	.poll = nes_poll,
+	.calculate_hash = nes_calculate_hash,
+	.set_hardcore = nes_set_hardcore,
+	.detect_protocol = nes_detect_protocol,
+	.console_id = 91,  // RC_CONSOLE_FAMICOM_DISK_SYSTEM
+	.name = "Famicom Disk System",
+	.hardcore_protected = 1
 };
