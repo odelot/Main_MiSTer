@@ -49,7 +49,7 @@ The [upstream Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer) binary m
 | `ra_ramread.cpp / .h` | Reads emulated console RAM from the DDRAM mirror written by the FPGA core |
 | `ra_cdreader_chd.cpp / .h` | Unified CD reader bridge: `.chd` via MiSTer's `libchdr`, `.cue`/`.gdi` via the rcheevos default handler. Registered at startup, enabling CHD disc support for all disc-based consoles (PSX, Mega CD, PCE-CD, NeoGeo CD). |
 | `shmem.cpp / .h` | Thin wrapper around `/dev/mem` + `mmap` for ARM ↔ FPGA shared memory access |
-| `retroachievements.cfg` | User credentials file (username / password) |
+| `retroachievements.cfg` | User credentials and options (username, password, hardcore mode, leaderboards, popup settings, debug) |
 | `lib/rcheevos/` | The [rcheevos](https://github.com/RetroAchievements/rcheevos) library (achievement logic, server protocol) |
 
 ### Files Modified (hooks into the main loop)
@@ -59,6 +59,7 @@ The [upstream Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer) binary m
 | `scheduler.cpp` | Calls `achievements_poll()` every frame |
 | `menu.cpp` | Calls `achievements_load_game()` when a ROM is selected |
 | `main.cpp` | Calls `achievements_init()` / `achievements_deinit()` at startup/shutdown |
+| `user_io.cpp` | Notifies the RA layer when a core reset is triggered (keyboard or joystick combo) |
 | `Makefile` | Conditionally compiles rcheevos sources and links against them |
 
 No other existing behavior is changed.
@@ -97,13 +98,14 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 
 ### How It Works
 
-1. **Init** — On startup, the ARM binary maps the DDRAM mirror region, starts an HTTP worker thread, and loads credentials from `retroachievements.cfg`. Login to RetroAchievements is **deferred**: it only fires once the FPGA mirror's magic value (`"RACH"`) is detected and its frame counter is seen advancing. This means that loading the **standard community core** (which lacks the RA mirror module) silently suppresses all RA activity — no spurious login or network calls are made.
-2. **Load Game** — When a ROM is selected in the MiSTer menu, the binary computes the ROM's MD5 hash and identifies the game against the RA database.
+1. **Init** — On startup, the ARM binary maps the DDRAM mirror region, starts an HTTP worker thread, and loads credentials from `retroachievements.cfg`.
+2. **Load Game** — When a ROM is selected in the MiSTer menu, the binary checks internet connectivity (DNS + non-blocking TCP probe to `retroachievements.org`). If online and not yet logged in, it logs in to RetroAchievements on the spot, then computes the ROM's MD5 hash and identifies the game against the RA database. If no internet is detected, an OSD message is shown and login is deferred. Loading the **standard community core** (which lacks the RA mirror module) silently suppresses all RA activity — no spurious login or network calls are made.
 3. **Per-Frame Poll** — Every frame (~60 Hz), `achievements_poll()` checks whether the FPGA has written new data. If a new frame is available, it calls `rc_client_do_frame()` from the rcheevos library, which evaluates achievement conditions against the current RAM state.
-4. **Unlock / Notify** — When an achievement triggers, the event handler displays an OSD notification and optionally plays a sound (`/media/fat/achievement.wav`). The unlock is reported to the RA server asynchronously.
-5. **Unload / Shutdown** — State is cleaned up when switching cores or shutting down.
+4. **Unlock / Notify** — When an achievement triggers, the event handler displays an OSD notification and optionally plays a sound (`/media/fat/achievement.wav`). The unlock is reported to the RA server asynchronously. Leaderboard events (start, fail, submit, scoreboard result) also show OSD notifications; a tracker display updates in real time while a leaderboard is active.
+5. **Core Reset** — When the user triggers a core reset (keyboard shortcut or joystick combo), the RA layer is notified so the rcheevos client can reset its internal state correctly.
+6. **Unload / Shutdown** — State is cleaned up when switching cores or shutting down.
 
-> Currently achievements run in **softcore mode** (savestates allowed). Hardcore mode is disabled since there is no anti-tamper mechanism yet.
+> Achievements default to **softcore mode** (savestates allowed).
 
 ### Achievement List (F6)
 
