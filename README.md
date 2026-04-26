@@ -9,6 +9,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | Core | Console ID | Modified Core Repo |
 |------|-----------|--------------------|
 | NES | 7 | [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) |
+| Famicom Disk System (via NES core) | 91 | [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) |
 | SNES | 3 | [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer) |
 | Genesis / Mega Drive | 1 | [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer) |
 | Master System / Game Gear | 11 | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
@@ -105,7 +106,9 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 5. **Core Reset** — When the user triggers a core reset (keyboard shortcut or joystick combo), the RA layer is notified so the rcheevos client can reset its internal state correctly.
 6. **Unload / Shutdown** — State is cleaned up when switching cores or shutting down.
 
-> Achievements default to **softcore mode** (savestates allowed).
+> Achievements run in **softcore mode** by default. Set `hardcore=1` in `retroachievements.cfg` to request hardcore mode.
+>
+> Hardcore enforcement is currently implemented for the **NES/FDS path** (core-level restrictions for load-state and cheats). Unsupported cores are automatically forced back to softcore.
 
 ### Achievement List (F6)
 
@@ -140,10 +143,12 @@ There are two protocols for exposing emulated RAM to the ARM:
 - **Full Mirror** — The FPGA copies all relevant RAM to DDRAM every VBlank. Simple but only viable for small RAM spaces.
 - **Selective Address (Option C)** — The ARM writes a list of addresses it needs; the FPGA reads only those values and writes them back. Required for cores with large address spaces.
 
-#### NES — Full Mirror (`ra_ram_mirror.sv`)
+#### NES / Famicom Disk System — Full Mirror (`ra_ram_mirror.sv`)
 The FPGA copies all relevant RAM to DDRAM on every VBlank (~10 KB total):
 - **CPU-RAM** ($0000–$07FF) — 2 KB
 - **Cart SRAM** ($6000–$7FFF) — 8 KB
+
+When a `.fds` file is loaded, the ARM side automatically switches from NES console ID 7 to **Famicom Disk System ID 91** for correct RetroAchievements game identification. FDS hashing skips the 16-byte fwNES header (`FDS\x1A`) before MD5.
 
 #### SNES — Selective Address (`ra_ram_mirror_snes.sv`)
 Due to the larger RAM space, the ARM binary writes the list of addresses it needs, and the FPGA reads only those (~185 per frame):
@@ -269,6 +274,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | Core | Method |
 |------|--------|
 | NES | MD5 of ROM data, skipping 16-byte iNES header and optional 512-byte trainer |
+| Famicom Disk System (FDS) | MD5 of disk data, skipping 16-byte fwNES FDS header (`FDS\x1A`) |
 | SNES | MD5 of ROM data, skipping optional 512-byte SMC/SWC copier header (detected when `file_size % 1024 == 512`) |
 | Genesis | MD5 of the raw ROM file (no header skipping needed) |
 | Mega CD | `rc_hash_generate_from_file()` from rcheevos — handles `.cue+.bin` and `.chd` disc images natively |
@@ -292,7 +298,7 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
    ```
 3. Copy **all files** from the release to `/media/fat` on your MiSTer SD card (the `MiSTer` binary, `retroachievements.cfg`, and the `lib/` folder if included).
 4. You will also need one or more of the **modified cores**:
-   - **NES**: [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer)
+   - **NES / FDS**: [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer)
    - **SNES**: [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer)
    - **Genesis / Mega Drive**: [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer)
    - **Master System / Game Gear**: [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer)
