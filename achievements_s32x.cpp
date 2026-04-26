@@ -167,9 +167,9 @@ return 0; // use default MD5
 
 static void s32x_set_hardcore(int enabled)
 {
-user_io_status_set("[64]", enabled ? 1 : 0); // disable cheats
-user_io_status_set("[24]", enabled ? 1 : 0); // disable save states
-ra_log_write("S32X: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
+	user_io_status_set("[56]", enabled ? 1 : 0); // hardcore signal
+	user_io_status_set("[24]", enabled ? 1 : 0); // disable cheats OSD toggle
+	ra_log_write("S32X: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
 static int s32x_detect_protocol(void *map)
@@ -197,5 +197,6 @@ const console_handler_t g_console_s32x = {
 .set_hardcore = s32x_set_hardcore,
 .detect_protocol = s32x_detect_protocol,
 .console_id = 10,  // RC_CONSOLE_SEGA_32X
-.name = "S32X"
+.name = "S32X",
+.hardcore_protected = 1
 };
