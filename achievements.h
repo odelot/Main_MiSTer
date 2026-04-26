@@ -68,5 +68,9 @@ int achievements_list_count(void);
 // Update global frame counters (called by per-console poll handlers)
 void ra_frame_processed(uint32_t frame);
 int achievements_stall_recovery_enabled(void);
+int achievements_rtquery_enabled(void);
+int achievements_recollect_interval(void);
+int achievements_smart_cache_enabled(void);
+int achievements_n64_snapshot_enabled(void);
 
 #endif // ACHIEVEMENTS_H

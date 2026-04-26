@@ -100,7 +100,9 @@ static int sms_poll(void *map, void *client, int game_loaded)
 			g_sms_state.stall_frame = resp_frame;
 
 			// Re-collect every ~5 min to catch address changes
-			int re_collect = (g_sms_state.game_frames % 18000 == 0) && (g_sms_state.game_frames > 0);
+			// Smart cache mode: skip re-collect (no dynamic pointers in SMS)
+			int re_collect = !achievements_smart_cache_enabled()
+				&& (g_sms_state.game_frames % 18000 == 0) && (g_sms_state.game_frames > 0);
 			if (re_collect) {
 				g_sms_state.collecting = 1;
 				ra_snes_addrlist_begin_collect();
@@ -149,7 +151,8 @@ static int sms_calculate_hash(const char *rom_path, char *md5_hex_out)
 
 static void sms_set_hardcore(int enabled)
 {
-	user_io_status_set("[24]", enabled ? 1 : 0); // disable cheats
+	user_io_status_set("[55]", enabled ? 1 : 0); // hardcore signal
+	user_io_status_set("[24]", enabled ? 1 : 0); // disable cheats OSD toggle
 	ra_log_write("SMS: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
@@ -178,5 +181,6 @@ const console_handler_t g_console_sms = {
 	.set_hardcore = sms_set_hardcore,
 	.detect_protocol = sms_detect_protocol,
 	.console_id = 11,  // RC_CONSOLE_MASTER_SYSTEM (also handles Game Gear ID 15)
-	.name = "SMS"
+	.name = "SMS",
+	.hardcore_protected = 1
 };

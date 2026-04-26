@@ -42,7 +42,7 @@ typedef struct __attribute__((packed)) {
 	uint32_t magic;          // 0x00: Must be RA_MAGIC (0x52414348)
 	uint8_t  region_count;   // 0x04: Number of RAM regions
 	uint8_t  flags;          // 0x05: Bit 0 = busy (transfer in progress)
-	uint16_t reserved;       // 0x06: Reserved
+	uint16_t core_version;   // 0x06: (major << 8) | minor — written by FPGA, 0 if unsupported
 	uint32_t frame_counter;  // 0x08: Increments each VBlank
 	uint32_t reserved2;      // 0x0C: SNES: bsram_size in bytes; NES: 0
 } ra_header_t;
@@ -146,6 +146,11 @@ void  ra_ramread_unmap(void *map);
 // Check if RA mirror is active (magic number matches)
 int ra_ramread_active(const void *map);
 
+// Read the core version written by the FPGA into the DDRAM header.
+// Fills *major and *minor. Returns 0 (and sets both to 0) if map is null,
+// magic doesn't match, or the FPGA didn't write a version.
+int ra_ramread_get_core_version(const void *map, uint8_t *major, uint8_t *minor);
+
 // Get current frame counter (returns 0 if not active)
 uint32_t ra_ramread_frame(const void *map);
 
@@ -195,6 +200,16 @@ const uint32_t *ra_snes_addrlist_addrs(void);  // Returns pointer to sorted addr
 uint32_t ra_snes_addrlist_request_id(void);     // Current expected request ID
 uint32_t ra_snes_addrlist_response_frame(const void *map);
 void     ra_snes_addrlist_diag_dump(const void *map);
+
+// Smart Cache: incremental address management (no periodic recollect)
+// Used when a read_memory call finds an address not in the batch cache.
+// The address is inserted into the sorted list and flushed to DDRAM
+// after the frame, so the FPGA monitors it from the next VBlank onward.
+int      ra_snes_addrlist_contains(uint32_t addr);       // Returns index if found, -1 on miss
+int      ra_snes_addrlist_add_dynamic(uint32_t addr);    // Insert in sorted position, returns 1 if added
+int      ra_snes_addrlist_has_pending(void);              // 1 if new dynamic addresses need flush
+int      ra_snes_addrlist_flush_dynamic(void *map);      // Write updated list to DDRAM, returns 1 if flushed
+int      ra_snes_addrlist_dynamic_count(void);            // Number of addresses added dynamically this cycle
 
 // Print a full diagnostic dump of the DDRAM mirror state to stdout and optional log file.
 // Includes: header validation, frame counter, region descriptors, hex dump of first bytes.

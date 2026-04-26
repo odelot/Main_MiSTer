@@ -143,8 +143,9 @@ static int neogeo_poll(void *map, void *client, int game_loaded)
 			g_neogeo_state.stall_frame = resp_frame;
 
 			// Re-collect every 18000 frames (~5min).
-			// Do NOT invalidate cache: avoids zeros during active gameplay.
-			int re_collect = (g_neogeo_state.game_frames % 18000 == 0) && (g_neogeo_state.game_frames > 0);
+			// Smart cache mode: skip re-collect
+			int re_collect = !achievements_smart_cache_enabled()
+				&& (g_neogeo_state.game_frames % 18000 == 0) && (g_neogeo_state.game_frames > 0);
 			if (re_collect) {
 				g_neogeo_state.collecting = 1;
 				ra_snes_addrlist_begin_collect();

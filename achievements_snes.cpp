@@ -153,7 +153,9 @@ static int snes_poll(void *map, void *client, int game_loaded)
 			}
 
 			// Periodically re-collect to catch address changes (every ~5 min)
-			int re_collect = (g_snes_state.game_frames % 18000 == 0) && (g_snes_state.game_frames > 0);
+			// Smart cache mode: skip re-collect (no dynamic pointers in SNES)
+			int re_collect = !achievements_smart_cache_enabled()
+				&& (g_snes_state.game_frames % 18000 == 0) && (g_snes_state.game_frames > 0);
 			if (re_collect) {
 				g_snes_state.collecting = 1;
 				ra_snes_addrlist_begin_collect();
@@ -279,5 +281,6 @@ const console_handler_t g_console_snes = {
 	.set_hardcore = snes_set_hardcore,
 	.detect_protocol = snes_detect_protocol,
 	.console_id = 3,  // RC_CONSOLE_SUPER_NINTENDO
-	.name = "SNES"
+	.name = "SNES",
+	.hardcore_protected = 1
 };

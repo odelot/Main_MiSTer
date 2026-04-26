@@ -51,6 +51,18 @@ int ra_ramread_busy(const void *map)
 	return (hdr->flags & RA_FLAG_BUSY) ? 1 : 0;
 }
 
+int ra_ramread_get_core_version(const void *map, uint8_t *major, uint8_t *minor)
+{
+	if (major) *major = 0;
+	if (minor) *minor = 0;
+	if (!map) return 0;
+	const ra_header_t *hdr = (const ra_header_t *)map;
+	if (hdr->magic != RA_MAGIC || hdr->core_version == 0) return 0;
+	if (major) *major = (hdr->core_version >> 8) & 0xFF;
+	if (minor) *minor = hdr->core_version & 0xFF;
+	return 1;
+}
+
 static const ra_region_desc_t *get_region_desc(const void *map, int region_index)
 {
 	const ra_header_t *hdr = (const ra_header_t *)map;
@@ -469,6 +481,97 @@ void ra_snes_addrlist_diag_dump(const void *map)
 	// Dump ADDRLIST header as seen from DDRAM
 	const ra_addr_req_hdr_t *ahdr = (const ra_addr_req_hdr_t *)(base + RA_SNES_ADDRLIST_OFFSET);
 	RA_DBG("ADDRLIST hdr in DDRAM: count=%u req_id=%u", ahdr->addr_count, ahdr->request_id);
+}
+
+// ======================================================================
+// Smart Cache: incremental address management
+// ======================================================================
+
+static int s_dynamic_pending = 0;   // 1 if new addresses added since last flush
+static int s_dynamic_added   = 0;   // count of addresses added this cycle
+
+int ra_snes_addrlist_contains(uint32_t addr)
+{
+	if (s_snes_addr_count == 0) return -1;
+	int lo = 0, hi = s_snes_addr_count - 1;
+	while (lo <= hi) {
+		int mid = (lo + hi) / 2;
+		if (s_snes_addrs[mid] == addr) return mid;
+		if (s_snes_addrs[mid] < addr) lo = mid + 1;
+		else hi = mid - 1;
+	}
+	return -1;
+}
+
+int ra_snes_addrlist_add_dynamic(uint32_t addr)
+{
+	// Check if already in the list
+	if (s_snes_addr_count > 0) {
+		int lo = 0, hi = s_snes_addr_count - 1;
+		int insert_pos = s_snes_addr_count; // default: append at end
+		while (lo <= hi) {
+			int mid = (lo + hi) / 2;
+			if (s_snes_addrs[mid] == addr) return 0; // already exists
+			if (s_snes_addrs[mid] < addr) lo = mid + 1;
+			else { insert_pos = mid; hi = mid - 1; }
+		}
+		if (lo < s_snes_addr_count && s_snes_addrs[lo] > addr)
+			insert_pos = lo;
+		if (s_snes_addr_count >= RA_SNES_MAX_ADDRS) return 0; // list full
+
+		// Insert at sorted position
+		if (insert_pos < s_snes_addr_count) {
+			memmove(&s_snes_addrs[insert_pos + 1],
+				&s_snes_addrs[insert_pos],
+				(s_snes_addr_count - insert_pos) * sizeof(uint32_t));
+		}
+		s_snes_addrs[insert_pos] = addr;
+	} else {
+		if (s_snes_addr_count >= RA_SNES_MAX_ADDRS) return 0;
+		s_snes_addrs[0] = addr;
+	}
+	s_snes_addr_count++;
+	s_dynamic_pending = 1;
+	s_dynamic_added++;
+	return 1;
+}
+
+int ra_snes_addrlist_has_pending(void)
+{
+	return s_dynamic_pending;
+}
+
+int ra_snes_addrlist_flush_dynamic(void *map)
+{
+	if (!s_dynamic_pending || !map) return 0;
+	s_dynamic_pending = 0;
+	int flushed = s_dynamic_added;
+	s_dynamic_added = 0;
+
+	// Bump request ID and write entire list to DDRAM
+	s_snes_request_id++;
+	uint8_t *base = (uint8_t *)map;
+
+	// Write addresses first
+	uint32_t *addrs = (uint32_t *)(base + RA_SNES_ADDRLIST_OFFSET + 8);
+	memcpy(addrs, s_snes_addrs, s_snes_addr_count * sizeof(uint32_t));
+	__sync_synchronize();
+
+	// Write header
+	ra_addr_req_hdr_t *hdr = (ra_addr_req_hdr_t *)(base + RA_SNES_ADDRLIST_OFFSET);
+	hdr->addr_count = s_snes_addr_count;
+	__sync_synchronize();
+	hdr->request_id = s_snes_request_id;
+	__sync_synchronize();
+
+	RA_DBG("SmartCache flush: %d new addrs, total=%d, request_id=%u",
+		flushed, s_snes_addr_count, s_snes_request_id);
+	return 1;
+}
+
+int ra_snes_addrlist_dynamic_count(void)
+{
+	return s_dynamic_added;
 }
 
 // ======================================================================

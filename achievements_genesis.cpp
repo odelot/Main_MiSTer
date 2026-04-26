@@ -115,7 +115,9 @@ static int genesis_poll(void *map, void *client, int game_loaded)
 			}
 
 			// Re-collect every ~5 min to catch address changes
-			int re_collect = (g_md_state.game_frames % 18000 == 0) && (g_md_state.game_frames > 0);
+			// Smart cache mode: skip re-collect (no dynamic pointers in Genesis)
+			int re_collect = !achievements_smart_cache_enabled()
+				&& (g_md_state.game_frames % 18000 == 0) && (g_md_state.game_frames > 0);
 			if (re_collect) {
 				g_md_state.collecting = 1;
 				ra_snes_addrlist_begin_collect();
@@ -195,5 +197,6 @@ const console_handler_t g_console_genesis = {
 	.set_hardcore = genesis_set_hardcore,
 	.detect_protocol = genesis_detect_protocol,
 	.console_id = 1,  // RC_CONSOLE_MEGA_DRIVE
-	.name = "Genesis"
+	.name = "Genesis",
+	.hardcore_protected = 1
 };

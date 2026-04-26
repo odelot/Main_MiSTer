@@ -152,7 +152,9 @@ tgfx16_optionc_dump_valcache("early-frame", map);
 }
 
 // Re-collect every ~5 min
-int re_collect = (g_tgfx16_state.game_frames % 18000 == 0) && (g_tgfx16_state.game_frames > 0);
+// Smart cache mode: skip re-collect (no dynamic pointers in TGFx16)
+int re_collect = !achievements_smart_cache_enabled()
+&& (g_tgfx16_state.game_frames % 18000 == 0) && (g_tgfx16_state.game_frames > 0);
 if (re_collect) {
 g_tgfx16_state.collecting = 1;
 ra_snes_addrlist_begin_collect();

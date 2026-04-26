@@ -24,6 +24,7 @@
 #include "ra_ramread.h"
 #include "ra_http.h"
 #include "user_io.h"
+#include "cfg.h"
 #include "file_io.h"
 #include "menu.h"
 #include "osd.h"
@@ -192,7 +193,12 @@ static int g_show_progress_name        = 1; // 1 = include achievement name in p
 static int g_leaderboards_enabled      = 1; // 1 = handle leaderboard events and tracker popups
 static int g_hardcore                  = 0; // 1 = hardcore mode (disables cheats & save states)
 static int g_stall_recovery            = 0; // 1 = enable OptionC stall recovery (disabled by default)
+static int g_rtquery_enabled           = 1; // 1 = enable realtime queries for AddAddress resolution
+static int g_recollect_interval        = 600; // frames between address re-collections (PSX default 600, SNES 18000)
+static int g_smart_cache               = -1; // -1 = default per console, 1 = smart cache: rtquery on cache miss, no periodic recollect
+static int g_n64_snapshot              = 0;  // 1 = snapshot RDRAM at VBlank for consistent reads
 static char g_ua_clause[64]            = ""; // rcheevos user-agent clause (e.g. "rcheevos/11.6")
+static char g_fpga_core_version[8]     = "0.1"; // version reported by FPGA in DDRAM header
 
 // ---------------------------------------------------------------------------
 // Per-achievement event state (rate-limiting CHALLENGE, dedup PROGRESS)
@@ -431,6 +437,15 @@ static int ra_calculate_rom_md5(const char *path, char *md5_hex_out)
 		hash_data = rom_data + skip;
 		hash_size = file_size - skip;
 	}
+	
+	// FDS: skip fwNES FDS header ("FDS\x1a")
+	if (file_size > 16 &&
+		rom_data[0] == 0x46 && rom_data[1] == 0x44 &&  // 'F' 'D'
+		rom_data[2] == 0x53 && rom_data[3] == 0x1A) {  // 'S' 0x1a
+		RA_LOG("FDS header detected, skipping 16 bytes");
+		hash_data = rom_data + 16;
+		hash_size = file_size - 16;
+	}
 
 	// SNES: skip optional 512-byte SMC/SWC copier header
 	if ((file_size % 1024) == 512 && file_size > 512) {
@@ -516,8 +531,18 @@ static int ra_load_credentials(void)
 			g_hardcore = atoi(val);
 		} else if (!strcasecmp(key, "stall_recovery")) {
 			g_stall_recovery = atoi(val);
+		} else if (!strcasecmp(key, "rtquery_enabled") ||
+					!strcasecmp(key, "rtquery")) {
+			g_rtquery_enabled = atoi(val);
+		} else if (!strcasecmp(key, "recollect_interval")) {
+			g_recollect_interval = atoi(val);
+			if (g_recollect_interval < 60) g_recollect_interval = 60; // minimum 1 second
+		} else if (!strcasecmp(key, "smart_cache")) {
+			g_smart_cache = atoi(val);
 		} else if (!strcasecmp(key, "debug")) {
 			g_ra_debug = atoi(val);
+		} else if (!strcasecmp(key, "n64_snapshot")) {
+			g_n64_snapshot = atoi(val);
 		}
 	}
 	fclose(f);
@@ -528,10 +553,10 @@ static int ra_load_credentials(void)
 	}
 
 	RA_LOG("Credentials loaded: user=%s password=***(%zu chars)", g_ra_user, strlen(g_ra_password));
-	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d leaderboards_enabled=%d hardcore=%d stall_recovery=%d debug=%d",
+	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d leaderboards_enabled=%d hardcore=%d stall_recovery=%d rtquery=%d recollect=%d smart_cache=%d n64_snapshot=%d debug=%d",
                 g_show_challenge_show_popup, g_show_challenge_hide_popup,
                 g_show_progress_popups, g_show_progress_name, g_leaderboards_enabled,
-                g_hardcore, g_stall_recovery, g_ra_debug);
+                g_hardcore, g_stall_recovery, g_rtquery_enabled, g_recollect_interval, g_smart_cache, g_n64_snapshot, g_ra_debug);
 	return 1;
 }
 
@@ -1167,8 +1192,9 @@ void achievements_init(void)
 
 	rc_client_enable_logging(g_client, RC_CLIENT_LOG_LEVEL_VERBOSE, ra_log_callback);
 	rc_client_set_event_handler(g_client, ra_event_handler);
-	rc_client_set_hardcore_enabled(g_client, g_hardcore);
-	RA_LOG("Hardcore mode: %s", g_hardcore ? "ENABLED" : "disabled");
+	int core_protected = g_active_handler && g_active_handler->hardcore_protected;
+	rc_client_set_hardcore_enabled(g_client, g_hardcore && core_protected ? 1 : 0);
+	RA_LOG("Hardcore mode: %s", (g_hardcore && core_protected) ? "ENABLED" : "disabled");
 
 	// Configure User-Agent: "MiSTer/1.0 rcheevos/x.y.z" (updated per-core in achievements_load_game)
 	{
@@ -1200,14 +1226,13 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 {
         if (!g_active_handler) return;
 
-        // Update User-Agent with core-specific prefix (e.g. "NES_MiSTer/1.0 rcheevos/11.6")
         if (g_ua_clause[0]) {
                 const char *core_name = user_io_get_core_name(1);
                 char ua[128];
                 if (core_name && core_name[0])
-                        snprintf(ua, sizeof(ua), "%s_MiSTer/1.0 %s", core_name, g_ua_clause);
+                        snprintf(ua, sizeof(ua), "%s_MiSTer/%s %s", core_name, g_fpga_core_version, g_ua_clause);
                 else
-                        snprintf(ua, sizeof(ua), "MiSTer/1.0 %s", g_ua_clause);
+                        snprintf(ua, sizeof(ua), "MiSTer/%s %s", g_fpga_core_version, g_ua_clause);
                 ra_http_set_user_agent(ua);
                 RA_LOG("User-Agent updated: %s", ua);
         }
@@ -1218,6 +1243,19 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 
         // Store ROM path
         snprintf(g_rom_path, sizeof(g_rom_path), "%s", rom_path);
+
+        // Switch to FDS handler if we are NES and the ROM is an FDS file
+        if (g_active_handler && (g_active_handler->console_id == 7 || g_active_handler->console_id == 91)) {
+                size_t len = strlen(rom_path);
+                if (len >= 4 && strcasecmp(rom_path + len - 4, ".fds") == 0) {
+                        extern const console_handler_t g_console_fds;
+                        g_active_handler = &g_console_fds;
+                        RA_LOG("FDS ROM detected, switching handler to Famicom Disk System (ID 91)");
+                } else {
+                        extern const console_handler_t g_console_nes;
+                        g_active_handler = &g_console_nes;
+                }
+        }
 
         // Calculate hash — try handler first, fall back to generic MD5
         g_rom_md5[0] = '\0';
@@ -1353,6 +1391,16 @@ void achievements_poll(void)
 				}
 
 #ifdef HAS_RCHEEVOS
+				// Read FPGA core version from DDRAM header for User-Agent reporting
+				{
+					uint8_t vmaj = 0, vmin = 0;
+					if (ra_ramread_get_core_version(g_ra_map, &vmaj, &vmin))
+						snprintf(g_fpga_core_version, sizeof(g_fpga_core_version), "%u.%u", vmaj, vmin);
+					else
+						snprintf(g_fpga_core_version, sizeof(g_fpga_core_version), "0.1");
+					RA_LOG("FPGA core version: %s", g_fpga_core_version);
+				}
+
                                 // Trigger deferred game load (mirror activated, already logged in)
 				if (g_game_load_deferred && g_logged_in && g_rom_md5[0]
 						&& !g_game_load_pending) {
@@ -1593,6 +1641,35 @@ int achievements_stall_recovery_enabled(void)
 	return g_stall_recovery;
 }
 
+int achievements_rtquery_enabled(void)
+{
+	return g_rtquery_enabled;
+}
+
+int achievements_recollect_interval(void)
+{
+	return g_recollect_interval;
+}
+
+int achievements_smart_cache_enabled(void)
+{
+	if (g_smart_cache != -1) return g_smart_cache;
+
+#ifdef HAS_RCHEEVOS
+	int cid = ra_get_console_id();
+	if (cid == RC_CONSOLE_PLAYSTATION) {
+		return 1;
+	}
+#endif
+
+	return 0;
+}
+
+int achievements_n64_snapshot_enabled(void)
+{
+	return g_n64_snapshot;
+}
+
 void achievements_info(void)
 {
 	if (!ra_core_supported()) {
@@ -1681,27 +1758,18 @@ void achievements_info(void)
 // ---------------------------------------------------------------------------
 
 #ifdef HAS_RCHEEVOS
+struct AchViewItem {
+	bool is_header;
+	bool is_subline;
+	const char *text;
+	const rc_client_achievement_t *ach;
+};
 static rc_client_achievement_list_t *g_ach_view_list = nullptr;
+static AchViewItem *g_ach_view_items = nullptr;
 #endif
 static int g_ach_view_first    = 0;
 static int g_ach_view_selected = 0;
 static int g_ach_view_total    = 0;
-
-// Convert flat index to the achievement pointer, iterating buckets in order.
-#ifdef HAS_RCHEEVOS
-static const rc_client_achievement_t *ach_at_flat_index(int flat_idx)
-{
-	if (!g_ach_view_list) return nullptr;
-	// LOCK_STATE grouping orders buckets as LOCKED…UNLOCKED, so iterate in reverse
-	// to present unlocked achievements first.
-	for (int b = (int)g_ach_view_list->num_buckets - 1; b >= 0; b--) {
-		if (flat_idx < (int)g_ach_view_list->buckets[b].num_achievements)
-			return g_ach_view_list->buckets[b].achievements[flat_idx];
-		flat_idx -= (int)g_ach_view_list->buckets[b].num_achievements;
-	}
-	return nullptr;
-}
-#endif
 
 int achievements_has_active_game(void)
 {
@@ -1719,17 +1787,117 @@ int achievements_list_open(void)
 	if (!g_client || !g_logged_in || !g_game_loaded)
 		return 0;
 
-	// LOCK_STATE grouping: bucket 0 = unlocked, bucket 1 = locked — gives us unlocked-first order.
+	// Use LOCK_STATE grouping to get all achievements, we will categorize them manually
 	g_ach_view_list = rc_client_create_achievement_list(g_client,
 		RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE,
 		RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
 	if (!g_ach_view_list)
 		return 0;
 
-	uint32_t total = 0;
-	for (uint32_t b = 0; b < g_ach_view_list->num_buckets; b++)
-		total += g_ach_view_list->buckets[b].num_achievements;
-	g_ach_view_total = (int)total;
+	uint32_t total_ach = 0;
+	for (uint32_t b = 0; b < g_ach_view_list->num_buckets; b++) {
+		total_ach += g_ach_view_list->buckets[b].num_achievements;
+	}
+
+	const rc_client_achievement_t** achs_active = new const rc_client_achievement_t*[total_ach];
+	const rc_client_achievement_t** achs_prog = new const rc_client_achievement_t*[total_ach];
+	const rc_client_achievement_t** achs_locked = new const rc_client_achievement_t*[total_ach];
+	const rc_client_achievement_t** achs_unlocked = new const rc_client_achievement_t*[total_ach];
+	int n_active = 0, n_prog = 0, n_locked = 0, n_unlocked = 0;
+
+	for (uint32_t b = 0; b < g_ach_view_list->num_buckets; b++) {
+		for (uint32_t a = 0; a < g_ach_view_list->buckets[b].num_achievements; a++) {
+			const rc_client_achievement_t* ach = g_ach_view_list->buckets[b].achievements[a];
+			if (ach->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED) {
+				achs_unlocked[n_unlocked++] = ach;
+			} else if (ach->bucket == RC_CLIENT_ACHIEVEMENT_BUCKET_ACTIVE_CHALLENGE) {
+				achs_active[n_active++] = ach;
+			} else if (ach->measured_progress[0] != '\0') {
+				achs_prog[n_prog++] = ach;
+			} else {
+				achs_locked[n_locked++] = ach;
+			}
+		}
+	}
+
+	uint32_t total_items = 0;
+	if (n_active > 0) total_items += 1 + n_active;
+	if (n_prog > 0) total_items += 1 + (n_prog * 2);
+	if (n_locked > 0) total_items += 1 + n_locked;
+	if (n_unlocked > 0) total_items += 1 + n_unlocked;
+
+	g_ach_view_items = new AchViewItem[total_items];
+	int idx = 0;
+
+	if (n_active > 0) {
+		g_ach_view_items[idx].is_header = true;
+		g_ach_view_items[idx].is_subline = false;
+		g_ach_view_items[idx].text = "Active Challenges";
+		g_ach_view_items[idx].ach = nullptr;
+		idx++;
+		for (int i = 0; i < n_active; i++) {
+			g_ach_view_items[idx].is_header = false;
+			g_ach_view_items[idx].is_subline = false;
+			g_ach_view_items[idx].text = nullptr;
+			g_ach_view_items[idx].ach = achs_active[i];
+			idx++;
+		}
+	}
+	if (n_prog > 0) {
+		g_ach_view_items[idx].is_header = true;
+		g_ach_view_items[idx].is_subline = false;
+		g_ach_view_items[idx].text = "In Progress";
+		g_ach_view_items[idx].ach = nullptr;
+		idx++;
+		for (int i = 0; i < n_prog; i++) {
+			g_ach_view_items[idx].is_header = false;
+			g_ach_view_items[idx].is_subline = false;
+			g_ach_view_items[idx].text = nullptr;
+			g_ach_view_items[idx].ach = achs_prog[i];
+			idx++;
+			
+			g_ach_view_items[idx].is_header = false;
+			g_ach_view_items[idx].is_subline = true;
+			g_ach_view_items[idx].text = nullptr;
+			g_ach_view_items[idx].ach = achs_prog[i];
+			idx++;
+		}
+	}
+	if (n_locked > 0) {
+		g_ach_view_items[idx].is_header = true;
+		g_ach_view_items[idx].is_subline = false;
+		g_ach_view_items[idx].text = "Locked";
+		g_ach_view_items[idx].ach = nullptr;
+		idx++;
+		for (int i = 0; i < n_locked; i++) {
+			g_ach_view_items[idx].is_header = false;
+			g_ach_view_items[idx].is_subline = false;
+			g_ach_view_items[idx].text = nullptr;
+			g_ach_view_items[idx].ach = achs_locked[i];
+			idx++;
+		}
+	}
+	if (n_unlocked > 0) {
+		g_ach_view_items[idx].is_header = true;
+		g_ach_view_items[idx].is_subline = false;
+		g_ach_view_items[idx].text = "Unlocked";
+		g_ach_view_items[idx].ach = nullptr;
+		idx++;
+		for (int i = 0; i < n_unlocked; i++) {
+			g_ach_view_items[idx].is_header = false;
+			g_ach_view_items[idx].is_subline = false;
+			g_ach_view_items[idx].text = nullptr;
+			g_ach_view_items[idx].ach = achs_unlocked[i];
+			idx++;
+		}
+	}
+
+	delete[] achs_active;
+	delete[] achs_prog;
+	delete[] achs_locked;
+	delete[] achs_unlocked;
+
+	g_ach_view_total = (int)total_items;
 #else
 	g_ach_view_total = 0;
 #endif
@@ -1741,6 +1909,10 @@ int achievements_list_open(void)
 void achievements_list_close(void)
 {
 #ifdef HAS_RCHEEVOS
+	if (g_ach_view_items) {
+		delete[] g_ach_view_items;
+		g_ach_view_items = nullptr;
+	}
 	if (g_ach_view_list) {
 		rc_client_destroy_achievement_list(g_ach_view_list);
 		g_ach_view_list = nullptr;
@@ -1819,17 +1991,30 @@ void achievements_list_print(void)
 
 		if (idx < total) {
 #ifdef HAS_RCHEEVOS
-			const rc_client_achievement_t *ach = ach_at_flat_index(idx);
-			if (ach) {
-				bool unlocked = (ach->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED);
-				s[0] = ' ';
-				s[1] = unlocked ? 0x1a : 0x1b;
-				s[2] = ' ';
-				strncpy(s + 3, ach->title, 26);
-				s[29] = 0;
-				int len = (int)strlen(s);
-				if (len > 28) {
-					s[28] = 22; // continuation marker (more text follows)
+			if (g_ach_view_items) {
+				const AchViewItem &item = g_ach_view_items[idx];
+				if (item.is_header) {
+					snprintf(s, 30, "--- %s", item.text ? item.text : "");
+					s[29] = 0;
+				} else if (item.is_subline) {
+					snprintf(s, 30, "    \\-> (%s)", item.ach->measured_progress);
+					s[29] = 0;
+				} else if (item.ach) {
+					const rc_client_achievement_t *ach = item.ach;
+					bool unlocked = (ach->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED);
+					s[0] = ' ';
+					s[1] = unlocked ? 0x1a : 0x1b;
+					s[2] = ' ';
+					
+					strncpy(s + 3, ach->title, 26);
+					s[29] = 0;
+					int len = (int)strlen(s);
+					if (len > 28) {
+						s[28] = 22; // continuation marker (more text follows)
+						s[29] = 0;
+					}
+				} else {
+					memset(s, ' ', 29);
 					s[29] = 0;
 				}
 			} else {

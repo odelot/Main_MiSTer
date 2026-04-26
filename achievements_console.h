@@ -21,6 +21,7 @@ typedef struct {
 	struct timespec cache_time; // Timestamp when cache became active
 	struct timespec stall_time; // Timestamp when resp_frame last advanced
 	uint32_t stall_frame;       // resp_frame value when stall tracking started
+	int cache_reindexing;       // 1 after cleanup prune, until FPGA responds with new index order
 } console_state_t;
 
 // Console-specific interface
@@ -54,10 +55,16 @@ typedef struct {
 
 	// Console name (matches user_io_get_core_name)
 	const char *name;
+
+	// 1 if this core has been updated with FPGA hardcore protection guardrails
+	// (cheats blocked, restore-state blocked via status register in hardware).
+	// Used as static guard before the dynamic FPGA capability-bit check.
+	int hardcore_protected;
 } console_handler_t;
 
 // Console handlers (implemented in separate files)
 extern const console_handler_t g_console_nes;
+extern const console_handler_t g_console_fds;
 extern const console_handler_t g_console_snes;
 extern const console_handler_t g_console_genesis;
 extern const console_handler_t g_console_psx;

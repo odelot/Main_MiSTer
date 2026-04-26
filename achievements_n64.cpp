@@ -21,10 +21,13 @@
 // ---------------------------------------------------------------------------
 
 static console_state_t g_n64_state = {};
-static void    *g_n64_rdram_direct  = NULL; // direct RDRAM mmap for fallback reads
-static uint8_t *g_n64_progress_buf  = NULL;
-static size_t   g_n64_progress_size = 0;
-static int      g_n64_resolve_cooldown = 0; // frames after resolution before re-enabling collection
+static void *g_n64_rdram_direct = NULL; // direct RDRAM mmap (8MB at 0x30000000)
+
+// Snapshot support (n64_snapshot=1 in config)
+static uint8_t *g_n64_snapshot_buf = NULL; // 8MB shadow buffer
+static int      g_n64_snapshot_active = 0; // 1 while snapshot is valid for current frame
+static double   g_n64_snap_copy_ms = 0.0;  // timing: last memcpy duration
+static uint32_t g_n64_snap_count = 0;      // total snapshots taken
 
 // ---------------------------------------------------------------------------
 // N64 Implementation
@@ -33,10 +36,19 @@ static int      g_n64_resolve_cooldown = 0; // frames after resolution before re
 static void n64_init(void)
 {
 	memset(&g_n64_state, 0, sizeof(g_n64_state));
-	g_n64_rdram_direct    = NULL;
-	g_n64_progress_buf    = NULL;
-	g_n64_progress_size   = 0;
-	g_n64_resolve_cooldown = 0;
+	g_n64_rdram_direct = NULL;
+	g_n64_snapshot_active = 0;
+	g_n64_snap_copy_ms = 0.0;
+	g_n64_snap_count = 0;
+
+	// Allocate snapshot buffer if enabled
+	if (achievements_n64_snapshot_enabled() && !g_n64_snapshot_buf) {
+		g_n64_snapshot_buf = (uint8_t *)malloc(0x800000); // 8MB
+		if (g_n64_snapshot_buf)
+			ra_log_write("N64: Snapshot buffer allocated (8MB)\n");
+		else
+			ra_log_write("N64: WARNING - failed to allocate snapshot buffer!\n");
+	}
 
 	// N64 savestates occupy 0x3C000000-0x3FFFFFFF (4 slots × 16MB),
 	// colliding with the default RA base at 0x3D000000.
@@ -48,209 +60,125 @@ static void n64_init(void)
 static void n64_reset(void)
 {
 	memset(&g_n64_state, 0, sizeof(g_n64_state));
-	g_n64_resolve_cooldown = 0;
+	g_n64_snapshot_active = 0;
 	if (g_n64_rdram_direct) {
 		shmem_unmap(g_n64_rdram_direct, 0x800000);
 		g_n64_rdram_direct = NULL;
 	}
-	if (g_n64_progress_buf) {
-		free(g_n64_progress_buf);
-		g_n64_progress_buf = NULL;
+	if (g_n64_snapshot_buf) {
+		free(g_n64_snapshot_buf);
+		g_n64_snapshot_buf = NULL;
 	}
-	g_n64_progress_size = 0;
 }
 
 static uint32_t n64_read_memory(void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes)
 {
-	if (g_n64_state.optionc) {
-		// N64 rcheevos addresses are big-endian; RDRAM in DDR3 is
-		// little-endian within 32-bit words.  XOR 3 on the low 2 bits converts.
-		if (g_n64_state.collecting) {
-			for (uint32_t i = 0; i < num_bytes; i++)
-				ra_snes_addrlist_add((address + i) ^ 3);
+	(void)map;
+
+	// Choose source: snapshot buffer (if active) or live RDRAM
+	const uint8_t *src = NULL;
+	if (g_n64_snapshot_active && g_n64_snapshot_buf)
+		src = g_n64_snapshot_buf;
+	else if (g_n64_rdram_direct)
+		src = (const uint8_t *)g_n64_rdram_direct;
+
+	if (src) {
+		// N64 RDRAM addresses are big-endian (rcheevos convention);
+		// RDRAM in DDR3 is little-endian within 32-bit words.
+		// XOR 3 on the low 2 bits converts.
+		for (uint32_t i = 0; i < num_bytes; i++) {
+			uint32_t ddr_addr = (address + i) ^ 3;
+			buffer[i] = (ddr_addr < 0x800000) ? src[ddr_addr] : 0;
 		}
-		// Always prefer direct RDRAM reads for consistency
-		if (g_n64_rdram_direct) {
-			const uint8_t *rdram = (const uint8_t *)g_n64_rdram_direct;
-			for (uint32_t i = 0; i < num_bytes; i++) {
-				uint32_t ddr_addr = (address + i) ^ 3;
-				buffer[i] = (ddr_addr < 0x800000) ? rdram[ddr_addr] : 0;
-			}
-			return num_bytes;
-		}
-		if (g_n64_state.cache_ready) {
-			for (uint32_t i = 0; i < num_bytes; i++)
-				buffer[i] = ra_snes_addrlist_read_cached(map, (address + i) ^ 3);
-			return num_bytes;
-		}
-		memset(buffer, 0, num_bytes);
 		return num_bytes;
 	}
-	return 0;
+
+	memset(buffer, 0, num_bytes);
+	return num_bytes;
 }
 
 static int n64_poll(void *map, void *client, int game_loaded)
 {
 #ifdef HAS_RCHEEVOS
-	if (!client || !game_loaded || !map || !g_n64_state.optionc) return 0;
+	if (!client || !game_loaded || !g_n64_rdram_direct) return 0;
 
 	rc_client_t *rc_client = (rc_client_t *)client;
 
-	// Ensure direct RDRAM mapping is available
-	if (!g_n64_rdram_direct) {
-		g_n64_rdram_direct = shmem_map(0x30000000, 0x800000);
-		if (g_n64_rdram_direct)
-			ra_log_write("N64 OptionC: Direct RDRAM mapped for fallback reads\n");
-		else
-			ra_log_write("N64 OptionC: WARNING - failed to map RDRAM for fallback!\n");
+	// Throttle to ~60Hz using monotonic clock.
+	// The FPGA frame counter fires at FSM-end (post-VBlank), which is
+	// the wrong moment for consistent reads. Time-based throttling
+	// distributes reads evenly across the frame instead.
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	static struct timespec last_frame_time = {0, 0};
+	if (last_frame_time.tv_sec != 0) {
+		double delta_ms = (now.tv_sec - last_frame_time.tv_sec) * 1000.0
+			+ (now.tv_nsec - last_frame_time.tv_nsec) / 1e6;
+		if (delta_ms < 16.0) return 1; // ~60Hz throttle
+	}
+	last_frame_time = now;
+
+	g_n64_state.game_frames++;
+	ra_frame_processed(g_n64_state.game_frames);
+
+	// Initialize on first frame
+	if (g_n64_state.game_frames == 1 && !g_n64_state.cache_ready) {
+		g_n64_state.cache_ready = 1;
+		g_n64_state.poll_logged = 0;
+		g_n64_state.cache_time = now;
+		ra_log_write("N64: RDRAM mirror active (direct reads, 60Hz throttle, snapshot=%d)\n",
+			achievements_n64_snapshot_enabled());
 	}
 
-	if (ra_snes_addrlist_count() == 0 && !g_n64_state.cache_ready) {
-		// Phase 1: Bootstrap — collect addresses with zero values
-		// Save rcheevos state before collection to prevent delta corruption
-		size_t psize = rc_client_progress_size(rc_client);
-		if (psize > g_n64_progress_size) {
-			free(g_n64_progress_buf);
-			g_n64_progress_buf = (uint8_t *)malloc(psize);
-			g_n64_progress_size = psize;
-		}
-		if (g_n64_progress_buf)
-			rc_client_serialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
+	if (g_n64_state.game_frames <= 5) {
+		uint32_t fpga_frame = ra_ramread_frame(map);
+		ra_log_write("N64: Frame %u (fpga=%u)\n", g_n64_state.game_frames, fpga_frame);
+	}
 
-		g_n64_state.collecting = 1;
-		ra_snes_addrlist_begin_collect();
-		rc_client_do_frame(rc_client);
-		g_n64_state.collecting = 0;
+	// --- Snapshot: copy RDRAM at frame start for consistent reads ---
+	g_n64_snapshot_active = 0;
+	if (achievements_n64_snapshot_enabled() && g_n64_snapshot_buf && g_n64_rdram_direct) {
+		struct timespec t0, t1;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		memcpy(g_n64_snapshot_buf, g_n64_rdram_direct, 0x800000);
+		clock_gettime(CLOCK_MONOTONIC, &t1);
 
-		// Restore state (undo delta/hit changes from zero-value reads)
-		if (g_n64_progress_buf)
-			rc_client_deserialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
+		g_n64_snapshot_active = 1;
+		g_n64_snap_count++;
+		g_n64_snap_copy_ms = (t1.tv_sec - t0.tv_sec) * 1000.0
+			+ (t1.tv_nsec - t0.tv_nsec) / 1e6;
 
-		int changed = ra_snes_addrlist_end_collect(map);
-		if (changed) {
-			g_n64_state.needs_recollect = 1;
-			g_n64_state.resolve_pass = 0;
-			ra_log_write("N64 OptionC: Bootstrap collection done, %d addrs written to DDRAM\n",
-				ra_snes_addrlist_count());
-		} else {
-			ra_log_write("N64 OptionC: No addresses collected\n");
-		}
-	} else if (!g_n64_state.cache_ready) {
-		// Phase 2/4: Wait for FPGA cache
-		if (ra_snes_addrlist_is_ready(map)) {
-			g_n64_state.cache_ready = 1;
-			if (g_n64_state.needs_recollect) {
-				ra_log_write("N64 OptionC: Cache active (pre-recollect). Will resolve pointers.\n");
-			} else {
-				if (g_n64_state.game_frames == 0) {
-					// First activation after bootstrap
-					g_n64_state.last_resp_frame = 0;
-					g_n64_state.poll_logged = 0;
-					clock_gettime(CLOCK_MONOTONIC, &g_n64_state.cache_time);
-					ra_log_write("N64 OptionC: Cache active! FPGA response matched request.\n");
-				} else {
-					ra_log_write("N64 OptionC: Resolution complete, resuming (%d addrs)\n",
-						ra_snes_addrlist_count());
-				}
-				if (g_n64_progress_buf)
-					rc_client_deserialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
-				g_n64_resolve_cooldown = 30;
-				ra_log_write("N64 OptionC: State restored via Phase 2, cooldown=30\n");
-			}
-		}
-	} else if (g_n64_state.needs_recollect) {
-		// Phase 3: Iterative pointer-resolution (multi-pass for AddAddress chains)
-		g_n64_state.resolve_pass++;
-		g_n64_state.collecting = 1;
-		ra_snes_addrlist_begin_collect();
-		rc_client_do_frame(rc_client);
-		g_n64_state.collecting = 0;
-
-		int changed = ra_snes_addrlist_end_collect(map);
-		if (changed && g_n64_state.resolve_pass < 4) {
-			ra_log_write("N64 OptionC: Pass %d found new addrs, %d total - re-resolving\n",
-				g_n64_state.resolve_pass, ra_snes_addrlist_count());
-			g_n64_state.cache_ready = 0; // wait for FPGA to respond with new addresses
-		} else {
-			ra_log_write("N64 OptionC: Pointer-resolution %s after %d passes, %d addrs\n",
-				changed ? "done (max passes)" : "stable",
-				g_n64_state.resolve_pass, ra_snes_addrlist_count());
-			g_n64_state.needs_recollect = 0;
-			if (changed) {
-				g_n64_state.cache_ready = 0; // need final FPGA response (Phase 2 will deserialize)
-			} else {
-				// Stable: restore state directly since Phase 2 is skipped
-				if (g_n64_progress_buf)
-					rc_client_deserialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
-				g_n64_resolve_cooldown = 30;
-				ra_log_write("N64 OptionC: State restored after stable resolution, cooldown=30\n");
-			}
-		}
-	} else {
-		// Phase 5: Normal frame processing
-		uint32_t resp_frame = ra_snes_addrlist_response_frame(map);
-		if (resp_frame > g_n64_state.last_resp_frame) {
-			g_n64_state.last_resp_frame = resp_frame;
-			g_n64_state.game_frames++;
-			ra_frame_processed(resp_frame);
-			clock_gettime(CLOCK_MONOTONIC, &g_n64_state.stall_time);
-			g_n64_state.stall_frame = resp_frame;
-
-			if (g_n64_state.game_frames <= 5)
-				ra_log_write("N64 OptionC: GameFrame %u (resp_frame=%u)\n",
-					g_n64_state.game_frames, resp_frame);
-
-			if (g_n64_resolve_cooldown > 0) {
-				// Cooldown: evaluate normally without collection to avoid oscillation
-				g_n64_resolve_cooldown--;
-				rc_client_do_frame(rc_client);
-			} else {
-				// Per-frame collection: detect pointer changes
-				size_t psize = rc_client_progress_size(rc_client);
-				if (psize > g_n64_progress_size) {
-					free(g_n64_progress_buf);
-					g_n64_progress_buf = (uint8_t *)malloc(psize);
-					g_n64_progress_size = psize;
-				}
-				if (g_n64_progress_buf)
-					rc_client_serialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
-
-				g_n64_state.collecting = 1;
-				ra_snes_addrlist_begin_collect();
-				rc_client_do_frame(rc_client);
-				g_n64_state.collecting = 0;
-
-				if (ra_snes_addrlist_end_collect(map)) {
-					// Pointer change detected: roll back and re-resolve
-					if (g_n64_progress_buf)
-						rc_client_deserialize_progress_sized(rc_client, g_n64_progress_buf, g_n64_progress_size);
-					ra_log_write("N64 OptionC: Pointer change at game_frame=%u, %d addrs\n",
-						g_n64_state.game_frames, ra_snes_addrlist_count());
-					g_n64_state.cache_ready = 0;
-					g_n64_state.needs_recollect = 1;
-					g_n64_state.resolve_pass = 0;
-				}
-			}
-		} else {
-			optionc_check_stall_recovery(&g_n64_state, resp_frame, "N64");
+		if (g_n64_snap_count <= 3 || (g_n64_snap_count % 300) == 0) {
+			ra_log_write("N64: Snapshot #%u took %.2fms\n",
+				g_n64_snap_count, g_n64_snap_copy_ms);
 		}
 	}
 
+	// Process achievements
+	rc_client_do_frame(rc_client);
+
+	// Invalidate snapshot after processing
+	g_n64_snapshot_active = 0;
+
+	// Periodic logging
 	uint32_t milestone = g_n64_state.game_frames / 300;
 	if (milestone > 0 && milestone != g_n64_state.poll_logged) {
 		g_n64_state.poll_logged = milestone;
-		struct timespec now;
-		clock_gettime(CLOCK_MONOTONIC, &now);
 		double elapsed = (now.tv_sec - g_n64_state.cache_time.tv_sec)
 			+ (now.tv_nsec - g_n64_state.cache_time.tv_nsec) / 1e9;
 		double ms_per_cycle = (g_n64_state.game_frames > 0) ?
 			(elapsed * 1000.0 / g_n64_state.game_frames) : 0.0;
-		ra_log_write("POLL(N64): resp_frame=%u game_frames=%u elapsed=%.1fs ms/cycle=%.1f addrs=%d\n",
-			g_n64_state.last_resp_frame, g_n64_state.game_frames, elapsed, ms_per_cycle,
-			ra_snes_addrlist_count());
+		if (achievements_n64_snapshot_enabled()) {
+			ra_log_write("POLL(N64): game_frames=%u elapsed=%.1fs ms/cycle=%.1f snap_ms=%.2f\n",
+				g_n64_state.game_frames, elapsed, ms_per_cycle, g_n64_snap_copy_ms);
+		} else {
+			ra_log_write("POLL(N64): game_frames=%u elapsed=%.1fs ms/cycle=%.1f\n",
+				g_n64_state.game_frames, elapsed, ms_per_cycle);
+		}
 	}
 
-	return 1; // N64 handled
+	return 1;
 #else
 	return 0;
 #endif
@@ -288,9 +216,26 @@ static int n64_detect_protocol(void *map)
 		ra_log_write("N64: FPGA mirror not detected -- RA support unavailable\n");
 		return 0;
 	}
-	// N64 always uses Option C
 	g_n64_state.optionc = 1;
-	ra_log_write("N64 FPGA protocol: Option C (selective address reading)\n");
+
+	// Map RDRAM directly — N64 RDRAM is at physical 0x30000000 (8MB)
+	if (!g_n64_rdram_direct) {
+		g_n64_rdram_direct = shmem_map(0x30000000, 0x800000);
+		if (g_n64_rdram_direct)
+			ra_log_write("N64: Direct RDRAM mapped at 0x30000000 (8MB)\n");
+		else
+			ra_log_write("N64: WARNING - failed to map RDRAM!\n");
+	}
+
+	// Allocate snapshot buffer on demand (if config loaded after init)
+	if (achievements_n64_snapshot_enabled() && !g_n64_snapshot_buf) {
+		g_n64_snapshot_buf = (uint8_t *)malloc(0x800000);
+		if (g_n64_snapshot_buf)
+			ra_log_write("N64: Snapshot buffer allocated (8MB)\n");
+	}
+
+	ra_log_write("N64: Full mirror mode (direct RDRAM access, snapshot=%d)\n",
+		achievements_n64_snapshot_enabled());
 	return 1;
 }
 
