@@ -1222,10 +1222,8 @@ void achievements_init(void)
 #endif
 }
 
-void achievements_load_game(const char *rom_path, uint32_t crc32)
+static void ra_update_user_agent(void)
 {
-        if (!g_active_handler) return;
-
         if (g_ua_clause[0]) {
                 const char *core_name = user_io_get_core_name(1);
                 char ua[128];
@@ -1236,6 +1234,13 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
                 ra_http_set_user_agent(ua);
                 RA_LOG("User-Agent updated: %s", ua);
         }
+}
+
+void achievements_load_game(const char *rom_path, uint32_t crc32)
+{
+        if (!g_active_handler) return;
+
+        ra_update_user_agent();
 
         RA_LOG("--- Game Load ---");
         RA_LOG("ROM path: %s", rom_path);
@@ -1399,6 +1404,7 @@ void achievements_poll(void)
 					else
 						snprintf(g_fpga_core_version, sizeof(g_fpga_core_version), "0.1");
 					RA_LOG("FPGA core version: %s", g_fpga_core_version);
+					ra_update_user_agent();
 				}
 
                                 // Trigger deferred game load (mirror activated, already logged in)
