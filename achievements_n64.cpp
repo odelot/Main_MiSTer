@@ -200,8 +200,9 @@ static int n64_calculate_hash(const char *rom_path, char *md5_hex_out)
 
 static void n64_set_hardcore(int enabled)
 {
-	ra_log_write("N64: Hardcore mode %s (no FPGA bits mapped)\n",
-		enabled ? "enabled" : "disabled");
+	user_io_status_set("[107]", enabled ? 1 : 0); // hardcore signal
+	user_io_status_set("[103]", enabled ? 1 : 0); // disable cheats OSD toggle
+	ra_log_write("N64: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
 static int n64_detect_protocol(void *map)
@@ -245,5 +246,6 @@ const console_handler_t g_console_n64 = {
 	.set_hardcore = n64_set_hardcore,
 	.detect_protocol = n64_detect_protocol,
 	.console_id = 2,  // RC_CONSOLE_NINTENDO_64
-	.name = "N64"
+	.name = "N64",
+	.hardcore_protected = 1
 };
