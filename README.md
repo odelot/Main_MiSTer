@@ -73,6 +73,7 @@ The RetroAchievements integration uses a four-layer pipeline that connects the F
 ┌───────────────────────────────────────────────────────┐
 │  FPGA Core (NES / SNES / Genesis / SMS / GB / GBA / N64 / PSX / MCD / NeoGeo / TG16 / Atari2600 / S32X) │
 │  ra_ram_mirror*.sv exposes emulated RAM to DDRAM      │
+│  (N64 uses direct RDRAM read + VBlank heartbeat)      │
 │  every VBlank (~60 Hz)                                │
 └──────────────────────┬────────────────────────────────┘
                        │  DDRAM at physical 0x3D000000
@@ -193,20 +194,28 @@ Uses the selective address protocol. The FPGA reads from dual-ported WRAM and ZP
 
 The Gameboy core multiplexes Port B of existing dual-port WRAM and ZPRAM BRAMs between savestate access and RA reads (RA takes priority when `ra_wram_req` / `ra_zpram_req` is asserted). Cart RAM is accessed read-only through SDRAM channel 2 with busy handshaking. A 2-cycle BRAM read path is used (address latch → output valid). The DDRAM arbiter in the core's `ddram.sv` module provides a dedicated channel for RA read/write operations alongside the savestate channel.
 
-#### N64 — Selective Address (`ra_ram_mirror_n64.sv`)
-Uses the same selective address protocol but with N64-specific adaptations. The FPGA reads requested byte addresses directly from RDRAM stored in DDR3:
-- **RDRAM** ($000000–$7FFFFF) — 4 to 8 MB
+#### N64 — Direct RDRAM Mapping + VBlank Heartbeat (`ra_ram_mirror_n64.sv`)
+N64 now uses a hybrid model closer to emulator-style memory access than classic Option C. The ARM side maps RDRAM directly and reads bytes on demand; the FPGA mirror only provides a reliable frame heartbeat.
+- **RDRAM** ($000000–$7FFFFF) — 4 to 8 MB (ARM direct mmap at physical 0x30000000)
 
 Key differences from other cores:
-- **Separate DDRAM base address** — N64 savestates occupy 0x3C000000–0x3FFFFFFF, colliding with the default RA mirror base. The N64 mirror is relocated to ARM physical 0x38000000.
-- **DDR3 bus arbitration** — A dedicated arbiter (`ddram_arb_n64.sv`) shares the DDR3 bus between the N64 core's 8 DDR3Mux clients (CPU, RSP, RDP, VI, etc.) and the RA mirror. A starvation counter (512-cycle limit, ~4 µs) ensures the RA mirror eventually gets bus access, and a burst mode optimization chains consecutive RA operations without re-entering the starvation wait.
-- **Clock domain crossing** — The N64 core's DDR3 controller runs at 125 MHz (`clk_2x`) while the RA mirror runs at ~62.5 MHz (`clk_1x`). Two-stage flip-flop synchronizers handle CDC for the toggle req/ack signals.
-- **Direct byte mapping** — RDRAM byte N maps directly to DDRAM byte N within each 64-bit word (the CPU's byteswap32 + memorymux half-swap already places bytes correctly). No additional XOR or byte reordering is needed on the FPGA side.
-- **8-VBlank warmup** — The mirror waits ~133 ms after reset before starting, to ensure the VI module (which generates VBlank) has stabilized.
+- **No per-VBlank address/value transfer** — unlike Option C cores, N64 no longer pushes address lists and value caches every frame.
+- **VBlank heartbeat only** — `ra_ram_mirror_n64.sv` (v4) writes a compact header at ARM physical 0x38000000 (`RACH` magic, frame counter, debug/version) and increments on each VI interrupt.
+- **Reliable VBlank source** — heartbeat is driven from VI interrupt (`vi_irq`) instead of video VBlank, which is more stable during transitions.
+- **Direct byte reads from RDRAM** — `achievements_n64.cpp` reads RDRAM directly, applying `addr ^ 3` for correct byte endianness mapping.
+- **Optional snapshot mode** — when `n64_snapshot=1`, Main_MiSTer copies 8 MB of RDRAM at each VBlank and evaluates achievements against this consistent snapshot.
+- **Separate RA base preserved** — heartbeat region remains at 0x38000000 to avoid N64 savestate slots at 0x3C000000–0x3FFFFFFF.
 
-#### PSX — Selective Address (`ra_ram_mirror_psx.sv`)
-Same request/response protocol. The FPGA reads requested addresses from SDRAM via a dedicated channel (CH4):
+#### PSX — Smart Option C + Realtime Query (`ra_ram_mirror_psx.sv`)
+PSX still uses selective-address transport on FPGA, but Main_MiSTer now runs a Smart Cache algorithm with realtime query fallback for dynamic addresses (`AddAddress`/`AddSource` chains):
 - **Main RAM** ($000000–$1FFFFF) — 2 MB
+
+Key behavior:
+- **Initial bootstrap only** — a first collect pass seeds the FPGA cache.
+- **Realtime miss resolution** — cache misses are read immediately through RTQuery mailbox transactions (`ra_rtquery_read`) instead of waiting for the next recollect cycle.
+- **Dynamic growth** — newly discovered runtime addresses are appended and flushed into the FPGA cache incrementally.
+- **No periodic pointer re-collection path** in Smart Cache mode — pointer-dependent reads are handled live via RTQuery; periodic cleanup only prunes stale entries and reindexes cache.
+- **FPGA v2 mailbox support** — PSX mirror exposes query control/request/response mailboxes (0x50000 region) used by runtime queries.
 
 #### NeoGeo (MVS / AES / CD) — Selective Address (`ra_ram_mirror_neogeo.sv`)
 Uses the selective address protocol. The FPGA reads from dual-ported 68K Work RAM BRAMs (WRAML + WRAMU, 8-bit each):
@@ -243,14 +252,18 @@ The SH2 is big-endian: byte 0 is at DDR word bits [63:56]. rcheevos expects litt
 
 ### `AddAddress` Support — Pointer Resolution
 
-Several achievement conditions use the `AddAddress` operator, which reads a pointer from memory and adds its value to a base address to obtain the actual memory location to evaluate. In the Selective Address protocol, this creates a bootstrapping problem: on first collection, all cached values are zero, so `AddAddress` conditions compute `base + 0` and only request the pointer address itself — the real target address cannot be known until the pointer's actual value is available.
+Several achievement conditions use pointer operators (`AddAddress`/`AddSource`) that derive effective addresses at runtime. In classic Selective Address pipelines, this creates a bootstrapping problem: on first collection, cached values are zero, so pointer expressions initially resolve to incomplete targets.
 
-To solve this, cores that use the Selective Address protocol run a multi-phase pointer-resolution sequence on game load:
+To solve this, cores use one of two strategies:
 
 1. **Bootstrap** — `rc_client_do_frame()` runs once in *collect mode* with all values assumed zero. This discovers the initial set of addresses, including pointer base addresses.
 2. **FPGA response** — The ARM waits for the FPGA to fill the value cache with real data.
-3. **Pointer-resolution pass** — `rc_client_do_frame()` runs again in collect mode, now with real pointer values. This resolves derived target addresses that were invisible in the bootstrap pass. For **N64**, this step is repeated up to **4 times** to handle chains of nested `AddAddress` conditions (each pass may reveal addresses that depend on values discovered in the previous pass).
+3. **Pointer-resolution pass** — `rc_client_do_frame()` runs again in collect mode, now with real pointer values. This resolves derived target addresses that were invisible in the bootstrap pass.
 4. **Resume normal processing** — Once the address list stabilises and the final FPGA response arrives, the pipeline enters its normal per-frame polling loop.
+
+For **PSX Smart Cache (default)**, misses are resolved in real time via RTQuery, so pointer targets can be discovered during normal frame execution without periodic pointer re-collect loops.
+
+For **N64**, pointer operators are evaluated directly against mapped RDRAM bytes (or snapshot data), gated by VI heartbeat frames.
 
 **State preservation**: Before and after each bootstrap or resolution pass, the rcheevos client state is serialized (`rc_client_serialize_progress`) and restored afterwards. This prevents zero-value reads during collection from spuriously incrementing hit counters or triggering delta conditions, keeping achievement evaluation correct.
 
@@ -266,8 +279,8 @@ To solve this, cores that use the Selective Address protocol run a multi-phase p
 | TG16 | every ~5 min (~18 000 frames) | No |
 | Atari 2600 | every frame (full mirror, no re-collection needed) | N/A |
 | Sega 32X | every ~5 min (~18 000 frames) | No |
-| PSX | every ~10 s (~600 frames) | Yes (1 pass) |
-| N64 | every ~10 s (~600 frames) | Yes (up to 4 passes) |
+| PSX (Smart Cache default) | no periodic pointer recollect; runtime RTQuery + periodic stale-cache cleanup (~10 s) | Live (runtime) |
+| N64 (direct mode) | no Option C recollect (direct RDRAM reads each VI frame) | Live (runtime) |
 
 ### ROM / Disc Hashing
 
