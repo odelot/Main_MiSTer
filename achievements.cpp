@@ -1285,6 +1285,17 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
         g_active_handler->reset();
         ra_snes_addrlist_init();
 
+        // RetroAchievements safety: zero the DDRAM mirror data area so any leftover
+        // bytes from the previous game cannot be fed to rcheevos before the FPGA
+        // refreshes the mirror. The header (magic/frame/region descriptors) is
+        // preserved so mirror validation logic continues to work; only the data
+        // payload (offset 0x100 onwards) and the realtime-query mailbox are cleared.
+        if (g_ra_map) {
+                uint8_t *base = (uint8_t *)g_ra_map;
+                memset(base + 0x100, 0, RA_DDRAM_MAP_SIZE - 0x100);
+                RA_LOG("DDRAM mirror data area zeroed at game load");
+        }
+
         // Check mirror state
         if (g_ra_map && ra_ramread_active(g_ra_map)) {
                 RA_LOG("Mirror active at game load time. Dumping:");
@@ -1549,6 +1560,15 @@ void achievements_unload_game(void)
 
         g_active_handler->reset();
         ra_snes_addrlist_init();
+
+        // RetroAchievements safety: clear the DDRAM mirror data area so the next
+        // game does not see stale bytes from the unloaded game. The header is
+        // preserved; only the payload (offset 0x100+) is wiped.
+        if (g_ra_map) {
+                uint8_t *base = (uint8_t *)g_ra_map;
+                memset(base + 0x100, 0, RA_DDRAM_MAP_SIZE - 0x100);
+                RA_LOG("DDRAM mirror data area zeroed at game unload");
+        }
 
         g_game_loaded = 0;
         g_game_load_pending = 0;
