@@ -104,39 +104,33 @@ static int n64_poll(void *map, void *client, int game_loaded)
 
 	rc_client_t *rc_client = (rc_client_t *)client;
 
-	// Throttle to ~60Hz using monotonic clock.
-	// The FPGA frame counter fires at FSM-end (post-VBlank), which is
-	// the wrong moment for consistent reads. Time-based throttling
-	// distributes reads evenly across the frame instead.
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
+	// Gate on FPGA VBlank frame counter.
+	// The FPGA uses the VI interrupt (irqVector(3)) as VBlank source,
+	// which fires when VI_CURRENT matches VI_INTR — same as RAProject64.
+	// This signal never stops, even during level transitions.
+	uint32_t frame = ra_ramread_frame(map);
+	if (frame == g_n64_state.last_resp_frame) return 1; // no new VBlank
 
-	static struct timespec last_frame_time = {0, 0};
-	if (last_frame_time.tv_sec != 0) {
-		double delta_ms = (now.tv_sec - last_frame_time.tv_sec) * 1000.0
-			+ (now.tv_nsec - last_frame_time.tv_nsec) / 1e6;
-		if (delta_ms < 16.0) return 1; // ~60Hz throttle
-	}
-	last_frame_time = now;
-
+	g_n64_state.last_resp_frame = frame;
 	g_n64_state.game_frames++;
 	ra_frame_processed(g_n64_state.game_frames);
+
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
 
 	// Initialize on first frame
 	if (g_n64_state.game_frames == 1 && !g_n64_state.cache_ready) {
 		g_n64_state.cache_ready = 1;
 		g_n64_state.poll_logged = 0;
 		g_n64_state.cache_time = now;
-		ra_log_write("N64: RDRAM mirror active (direct reads, 60Hz throttle, snapshot=%d)\n",
+		ra_log_write("N64: VBlank-gated polling active (snapshot=%d)\n",
 			achievements_n64_snapshot_enabled());
 	}
 
-	if (g_n64_state.game_frames <= 5) {
-		uint32_t fpga_frame = ra_ramread_frame(map);
-		ra_log_write("N64: Frame %u (fpga=%u)\n", g_n64_state.game_frames, fpga_frame);
-	}
+	if (g_n64_state.game_frames <= 5)
+		ra_log_write("N64: Frame %u (fpga=%u)\n", g_n64_state.game_frames, frame);
 
-	// --- Snapshot: copy RDRAM at frame start for consistent reads ---
+	// --- Snapshot: copy RDRAM at VBlank for consistent reads ---
 	g_n64_snapshot_active = 0;
 	if (achievements_n64_snapshot_enabled() && g_n64_snapshot_buf && g_n64_rdram_direct) {
 		struct timespec t0, t1;
@@ -155,7 +149,7 @@ static int n64_poll(void *map, void *client, int game_loaded)
 		}
 	}
 
-	// Process achievements
+	// Process achievements — synced with VI interrupt
 	rc_client_do_frame(rc_client);
 
 	// Invalidate snapshot after processing
@@ -216,7 +210,6 @@ static int n64_detect_protocol(void *map)
 		ra_log_write("N64: FPGA mirror not detected -- RA support unavailable\n");
 		return 0;
 	}
-	g_n64_state.optionc = 1;
 
 	// Map RDRAM directly — N64 RDRAM is at physical 0x30000000 (8MB)
 	if (!g_n64_rdram_direct) {
@@ -234,7 +227,7 @@ static int n64_detect_protocol(void *map)
 			ra_log_write("N64: Snapshot buffer allocated (8MB)\n");
 	}
 
-	ra_log_write("N64: Full mirror mode (direct RDRAM access, snapshot=%d)\n",
+	ra_log_write("N64: Direct RDRAM mode (snapshot=%d)\n",
 		achievements_n64_snapshot_enabled());
 	return 1;
 }

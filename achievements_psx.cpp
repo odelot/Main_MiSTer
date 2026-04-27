@@ -389,8 +389,8 @@ static int psx_calculate_hash(const char *rom_path, char *md5_hex_out)
 
 static void psx_set_hardcore(int enabled)
 {
-	user_io_status_set("[93]", enabled ? 1 : 0); // disable cheats
-	user_io_status_set("[6]",  enabled ? 1 : 0); // disable save states
+	user_io_status_set("[93]", enabled ? 1 : 0); // hardcore signal
+	user_io_status_set("[6]",  enabled ? 1 : 0); // disable cheats OSD toggle
 	ra_log_write("PSX: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
@@ -431,5 +431,6 @@ const console_handler_t g_console_psx = {
 	.set_hardcore = psx_set_hardcore,
 	.detect_protocol = psx_detect_protocol,
 	.console_id = 12,  // RC_CONSOLE_PLAYSTATION
-	.name = "PSX"
+	.name = "PSX",
+	.hardcore_protected = 1
 };
