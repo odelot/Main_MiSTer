@@ -946,13 +946,13 @@ static void ra_login_callback(int result, const char *error_message,
 
                 // Login now happens on demand during game load. Only identify once mirror is active.
                 if (g_rom_md5[0] && !g_game_loaded && !g_game_load_pending) {
-                        if (g_ra_map && ra_ramread_active(g_ra_map)) {
+                        if (g_mirror_validated) {
                                 RA_LOG("Game MD5 available, loading game: %s", g_rom_md5);
                                 g_game_load_pending = 1;
                                 rc_client_begin_load_game(g_client, g_rom_md5,
                                         ra_load_game_callback, NULL);
                         } else {
-                                RA_LOG("Login OK but mirror not active yet, deferring game identify.");
+                                RA_LOG("Login OK but mirror not validated yet, deferring game identify.");
                                 g_game_load_deferred = 1;
                         }
                 }
