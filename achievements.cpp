@@ -1683,7 +1683,7 @@ int achievements_smart_cache_enabled(void)
 
 #ifdef HAS_RCHEEVOS
 	int cid = ra_get_console_id();
-	if (cid == RC_CONSOLE_PLAYSTATION || cid == RC_CONSOLE_SUPER_NINTENDO) {
+	if (cid == RC_CONSOLE_PLAYSTATION || cid == RC_CONSOLE_NINTENDO) {
 		return 1;
 	}
 #endif
