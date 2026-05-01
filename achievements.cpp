@@ -1617,6 +1617,17 @@ void achievements_notify_core_reset(void)
         s_urgent_showing  = 0;
         s_instant_pending = 0;
         s_instant_showing = 0;
+
+        // Force mirror to re-validate so we don't poll stale DDRAM while the FPGA is in reset
+        g_mirror_validated = 0;
+        g_mirror_confirming = 0;
+
+        // Clear DDRAM payload so no old RAM is processed during the transition
+        if (g_ra_map) {
+                uint8_t *base = (uint8_t *)g_ra_map;
+                memset(base + 0x100, 0, RA_DDRAM_MAP_SIZE - 0x100);
+        }
+
 }
 
 void achievements_deinit(void)
@@ -1683,7 +1694,7 @@ int achievements_smart_cache_enabled(void)
 
 #ifdef HAS_RCHEEVOS
 	int cid = ra_get_console_id();
-	if (cid == RC_CONSOLE_PLAYSTATION || cid == RC_CONSOLE_NINTENDO) {
+	if (cid == RC_CONSOLE_PLAYSTATION || cid == RC_CONSOLE_NINTENDO || cid == RC_CONSOLE_MEGA_DRIVE || cid == RC_CONSOLE_SUPER_NINTENDO) {
 		return 1;
 	}
 #endif
