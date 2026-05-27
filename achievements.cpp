@@ -1177,9 +1177,12 @@ void achievements_init(void)
 	g_active_handler->init();
 
 	// Apply hardcore FPGA bits immediately so restrictions are active before any game loads
-	if (achievements_hardcore_active() && g_active_handler->set_hardcore) {
-		g_active_handler->set_hardcore(1);
-		RA_LOG("Hardcore: FPGA bits applied at core init for %s", g_active_handler->name);
+	if (g_active_handler->set_hardcore) {
+		int hardcore_active = achievements_hardcore_active();
+		g_active_handler->set_hardcore(hardcore_active ? 1 : 0);
+		RA_LOG("Hardcore: FPGA bits applied at core init for %s (%s)",
+			g_active_handler->name,
+			hardcore_active ? "ENABLED" : "disabled");
 	}
 
 #ifdef HAS_RCHEEVOS
@@ -1371,11 +1374,14 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
 
         RA_LOG("--- Game Load Complete, monitoring frames ---");
 
-        // Hardcore mode: let handler set console-specific FPGA bits
-        if (achievements_hardcore_active() && g_active_handler->set_hardcore) {
-                g_active_handler->set_hardcore(1);
-                RA_LOG("Hardcore: FPGA bits applied for %s", g_active_handler->name);
-        }
+		// Hardcore mode: always push on/off state so per-core bits cannot remain stale.
+		if (g_active_handler->set_hardcore) {
+			int hardcore_active = achievements_hardcore_active();
+			g_active_handler->set_hardcore(hardcore_active ? 1 : 0);
+			RA_LOG("Hardcore: FPGA bits applied for %s (%s)",
+				g_active_handler->name,
+				hardcore_active ? "ENABLED" : "disabled");
+		}
 }
 
 void achievements_poll(void)
