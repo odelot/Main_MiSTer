@@ -8,12 +8,12 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 
 | Core | Console ID | Hardcore | Modified Core Repo |
 |------|-----------|----------|--------------------|
-| NES | 7 | ✅ enforced | [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) |
-| Famicom Disk System (via NES core) | 81 | ✅ enforced | [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) |
-| SNES (incl. SA-1 / SuperFX) | 3 | ✅ enforced | [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer) |
-| Genesis / Mega Drive | 1 | ✅ enforced | [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer) |
-| N64 | 2 | ✅ enforced | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
-| PSX | 12 | ✅ enforced | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
+| NES | 7 | ✅ Officially Supported | [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) |
+| Famicom Disk System (via NES core) | 81 | ✅ Officially Supported | [odelot/NES_MiSTer](https://github.com/odelot/NES_MiSTer) |
+| SNES (incl. SA-1 / SuperFX) | 3 | ✅ Officially Supported | [odelot/SNES_MiSTer](https://github.com/odelot/SNES_MiSTer) |
+| Genesis / Mega Drive | 1 | ✅ Officially Supported | [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer) |
+| N64 | 2 | ✅ Officially Supported | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
+| PSX | 12 | ✅ Officially Supported | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
 | Master System / Game Gear | 11 / 15 | 🔧 wired, in validation | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
 | Gameboy / Gameboy Color | 4 / 6 | 🔧 wired, in validation | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
 | GBA (Game Boy Advance) | 5 | 🔧 wired, in validation | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
