@@ -15,12 +15,12 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | N64 | 2 | ✅ Supported | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
 | PSX | 12 | ✅ Supported | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
 | Gameboy / Gameboy Color | 4 / 6 | ✅ Supported | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
-| Master System / Game Gear | 11 / 15 | 🔧 wired, in validation | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
-| GBA (Game Boy Advance) | 5 | 🔧 wired, in validation | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
-| Mega CD / Sega CD | 9 | 🔧 wired, in validation | [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer) |
-| TurboGrafx-16 / PC Engine (incl. CD) | 8 / 76 | 🔧 wired, in validation | [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer) |
-| Sega 32X | 10 | 🔧 wired, in validation | [odelot/S32X_MiSTer](https://github.com/odelot/S32X_MiSTer) |
-| Virtual Boy | 28 | 🔧 wired, in validation | [odelot/VirtualBoy_MiSTer](https://github.com/odelot/VirtualBoy_MiSTer) |
+| Master System / Game Gear | 11 / 15 | HC wired, pending validation | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
+| GBA (Game Boy Advance) | 5 | HC wired, pending validation | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
+| Mega CD / Sega CD | 9 | HC wired, pending validation | [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer) |
+| TurboGrafx-16 / PC Engine (incl. CD) | 8 / 76 | HC wired, pending validation | [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer) |
+| Sega 32X | 10 | HC wired, pending validation | [odelot/S32X_MiSTer](https://github.com/odelot/S32X_MiSTer) |
+| Virtual Boy | 28 | HC wired, pending validation | [odelot/VirtualBoy_MiSTer](https://github.com/odelot/VirtualBoy_MiSTer) |
 | NeoGeo (MVS / AES / CD) | 27 / 56 | casual only | [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer) |
 | Atari 2600 (via Atari7800 core) | 25 | casual only | [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer) |
 | Atari 7800 (via Atari7800 core, `.a78`) | 51 | casual only | [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer) |
