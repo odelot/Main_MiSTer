@@ -2532,10 +2532,16 @@ static int should_auto_enable_direct_video()
 	// Read EDID if not already valid
 	read_edid();
 
-	if (!is_edid_valid()) return 0;
-
-	// Check manufacturer ID (bytes 0x08-0x09)
-	uint16_t mfg_id = (edid[0x08] << 8) | edid[0x09];
+	uint16_t mfg_id = 0;
+	if (is_edid_valid()) {
+		// Check manufacturer ID (bytes 0x08-0x09)
+		mfg_id = (edid[0x08] << 8) | edid[0x09];
+	} else if (raw_edid_mfg_id_valid) {
+		mfg_id = raw_edid_mfg_id;
+		printf("EDID: Invalid header, using raw manufacturer ID 0x%04X for DAC detection.\n", mfg_id);
+	} else {
+		return 0;
+	}
 
 	// Check against known DACs from config
 	for (int i = 0; i < dac_config_count; i++) {

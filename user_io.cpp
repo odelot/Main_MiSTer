@@ -1166,6 +1166,7 @@ int GetUARTMode()
 	if (!stat("/tmp/uartmode3", &filestat)) return 3;
 	if (!stat("/tmp/uartmode4", &filestat)) return 4;
 	if (!stat("/tmp/uartmode5", &filestat)) return 5;
+	if (!stat("/tmp/uartmode6", &filestat)) return 6;
 	return 0;
 }
 
@@ -2821,6 +2822,7 @@ int user_io_file_tx(const char* name, unsigned char index, char opensave, char m
 				}
 				free(rom);
 			}
+			dosend = 0;
 		}
 	}
 
