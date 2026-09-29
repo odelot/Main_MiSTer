@@ -337,5 +337,5 @@ const console_handler_t g_console_virtualboy = {
 	.detect_protocol = vb_detect_protocol,
 	.console_id = 28,  // RC_CONSOLE_VIRTUAL_BOY
 	.name = "VirtualBoy",
-	.hardcore_protected = 0
+	.hardcore_protected = 1
 };

@@ -14,13 +14,13 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | Genesis / Mega Drive | 1 | ✅ Supported | [odelot/MegaDrive_MiSTer](https://github.com/odelot/MegaDrive_MiSTer) |
 | N64 | 2 | ✅ Supported | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
 | PSX | 12 | ✅ Supported | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
-| Gameboy / Gameboy Color | 4 / 6 | ✅ Supported | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
-| Master System / Game Gear | 11 / 15 | HC wired, pending validation | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
+| Master System / Game Gear | 11 / 15 | ✅ Supported | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
+| Gameboy / Gameboy Color | 4 / 6 | HC wired, pending validation | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
 | GBA (Game Boy Advance) | 5 | HC wired, pending validation | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
 | Mega CD / Sega CD | 9 | HC wired, pending validation | [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer) |
 | TurboGrafx-16 / PC Engine (incl. CD) | 8 / 76 | HC wired, pending validation | [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer) |
 | Sega 32X | 10 | HC wired, pending validation | [odelot/S32X_MiSTer](https://github.com/odelot/S32X_MiSTer) |
-| Virtual Boy | 28 | HC wired, pending validation | [odelot/VirtualBoy_MiSTer](https://github.com/odelot/VirtualBoy_MiSTer) |
+| Virtual Boy | 28 | ✅ Supported | [odelot/VirtualBoy_MiSTer](https://github.com/odelot/VirtualBoy_MiSTer) |
 | NeoGeo (MVS / AES / CD) | 27 / 56 | casual only | [odelot/NeoGeo_MiSTer](https://github.com/odelot/NeoGeo_MiSTer) |
 | Atari 2600 (via Atari7800 core) | 25 | casual only | [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer) |
 | Atari 7800 (via Atari7800 core, `.a78`) | 51 | casual only | [odelot/Atari7800_MiSTer](https://github.com/odelot/Atari7800_MiSTer) |
@@ -138,8 +138,8 @@ Hardcore is only actually engaged on cores that enforce the restrictions **in ha
 
 | Status | Cores | Meaning |
 |--------|-------|---------|
-| ✅ **Officially Supported** | NES, FDS, SNES, Genesis/MD, N64, PSX, GB/GBC | FPGA guardrails validated; `hardcore=1` engages real hardcore (cheats disabled, restore-state blocked in hardware) |
-| 🔧 **Wired, in validation** | SMS/GG, GBA, MegaCD, TG16, 32X | The core RTL has the hardcore guardrails and Main maps the status bits, but the homologation checklist isn't complete - these cores still run casual unless you set `force_hardcore=1` (for testing at your own risk) |
+| ✅ **Supported** | NES, FDS, SNES, Genesis/MD, N64, PSX, GB/GBC, SMS/GG, Virtual Boy | FPGA guardrails validated; `hardcore=1` engages real hardcore (cheats disabled, restore-state blocked in hardware) |
+| **HC wired, pending validation** | GBA, MegaCD, TG16, 32X | The core RTL has the hardcore guardrails and Main maps the status bits, but the homologation checklist isn't complete - these cores still run casual unless you set `force_hardcore=1` (for testing at your own risk) |
 | - **casual only** | NeoGeo, Atari 2600/7800, Saturn | No hardcore bits wired (2600/7800/Saturn cores have no cheat engine / savestates to block; NeoGeo pending) |
 
 Per-core enforcement details (status bits written by Main):
@@ -148,7 +148,8 @@ Per-core enforcement details (status bits written by Main):
 - **SNES** - cheats disabled + save states disabled.
 - **Genesis / Mega Drive** - cheats disabled + save states disabled.
 - **N64** / **PSX** - dedicated hardcore signal + cheats OSD toggle forced off.
-- **SMS/GG, GB/GBC, GBA, MegaCD, TG16, 32X** - equivalent bits are wired (hardcore signal + cheats off; GBA additionally gates underclock, rewind and fast-forward) pending hardware validation.
+- **SMS/GG, GB/GBC, Virtual Boy** - hardcore signal (status bit 63) + cheats forced off in the core.
+- **GBA, MegaCD, TG16, 32X** - equivalent bits are wired (hardcore signal + cheats off; GBA additionally gates underclock, rewind and fast-forward) pending hardware validation.
 
 `force_hardcore=1` bypasses the per-core gate and requests hardcore everywhere - useful for validating a core, not recommended for regular play.
 
@@ -162,7 +163,7 @@ There are three protocols for exposing emulated RAM to the ARM:
 
 ### Selective Address operating modes
 
-- **Smart Cache (default for every Selective Address core when the FPGA is v2, except SMS)** - one bootstrap collection seeds the FPGA cache; from then on, cache misses (typically `AddAddress` pointer targets that moved) are answered **live** through the RTQuery mailbox and appended to the FPGA list incrementally. There is no periodic re-collection; a cleanup pass (~1/min, growth-gated) prunes stale dynamic addresses, which simply re-add themselves via misses if still needed. `smart_cache=0` can still be set to force Legacy mode on any core (e.g. for debugging).
+- **Smart Cache (default for every Selective Address core when the FPGA is v2)** - one bootstrap collection seeds the FPGA cache; from then on, cache misses (typically `AddAddress` pointer targets that moved) are answered **live** through the RTQuery mailbox and appended to the FPGA list incrementally. There is no periodic re-collection; a cleanup pass (~1/min, growth-gated) prunes stale dynamic addresses, which simply re-add themselves via misses if still needed. `smart_cache=0` can still be set to force Legacy mode on any core (e.g. for debugging).
 - **Legacy** - for v1 FPGAs (no mailbox): periodic re-collection (default every ~5 min, `recollect_interval`) refreshes the address list; misses read as 0 until the next recollect.
 
 ### Consistency layer - the active snapshot
@@ -227,8 +228,8 @@ Selective address reading with RTQuery mailbox; Smart Cache on by default. The F
 
 Unlike the MegaDrive core, no DDRAM arbitration is needed (`ddram_ra_mcd.sv` is a simple pass-through) because the Mega CD core has no other DDRAM consumer. Total exposed: **576 KB**.
 
-#### Master System / Game Gear - Selective Address (`ra_ram_mirror_sms.sv`)
-Selective address protocol (legacy mode). The FPGA reads from dual-ported System RAM and NVRAM:
+#### Master System / Game Gear - Smart Cache + Realtime Query (`ra_ram_mirror_sms.sv`)
+Selective address reading with RTQuery mailbox; Smart Cache on by default. The FPGA reads from dual-ported System RAM and NVRAM:
 - **System RAM** ($0000–$1FFF) - 8 KB (Z80 $C000–$DFFF mirrored)
 - **NVRAM / Cart RAM** ($2000–$9FFF) - up to 32 KB
 
@@ -356,7 +357,7 @@ All options live in `/media/fat/retroachievements.cfg`:
 | `leaderboards_enabled` | 1 | Enable leaderboard processing |
 | `multiline_desc` | 0 | Two-line achievement text in OSD popups |
 | `popup_position` | left | Popup corner on the top of the screen: `left`, `center` or `right`. Use `center` when the display crops the sides (e.g. HDMI forced to 4:3 on a TV) and the popup gets cut off. Unsupported values fall back to `left` |
-| `smart_cache` | auto | Force Smart Cache on (`1`) / off (`0`); default: on for every Selective Address core except SMS (v2 FPGAs) |
+| `smart_cache` | auto | Force Smart Cache on (`1`) / off (`0`); default: on for every Selective Address core (v2 FPGAs) |
 | `rtquery` | 1 | Enable the RTQuery mailbox (v2 FPGAs) |
 | `smart_cleanup` | 1 | Periodic pruning of stale dynamic addresses |
 | `recollect_interval` | 600 | Legacy-mode re-collection interval, in frames (PSX/GBA legacy; SNES-style cores use ~18000) |
