@@ -15,7 +15,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | N64 | 2 | ✅ Supported | [odelot/N64_MiSTer](https://github.com/odelot/N64_MiSTer) |
 | PSX | 12 | ✅ Supported | [odelot/PSX_MiSTer](https://github.com/odelot/PSX_MiSTer) |
 | Master System / Game Gear | 11 / 15 | ✅ Supported | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
-| Gameboy / Gameboy Color | 4 / 6 | HC wired, pending validation | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
+| Gameboy / Gameboy Color | 4 / 6 | ✅ Supported | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
 | GBA (Game Boy Advance) | 5 | HC wired, pending validation | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
 | Mega CD / Sega CD | 9 | HC wired, pending validation | [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer) |
 | TurboGrafx-16 / PC Engine (incl. CD) | 8 / 76 | HC wired, pending validation | [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer) |
