@@ -7,7 +7,7 @@
 
 set -e
 
-VERSION="${1:-v12.4.0}"
+VERSION="${1:-v12.5.0}"
 REPO="https://github.com/RetroAchievements/rcheevos.git"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
