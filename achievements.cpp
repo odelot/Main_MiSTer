@@ -1262,8 +1262,7 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 
         case RC_CLIENT_EVENT_GAME_COMPLETED:
 		RA_LOG("*** GAME COMPLETED! ***");
-		ra_notify_urgent("** GAME COMPLETED! **\n\nCongratulations!", 5000);
-		ra_play_achievement_sound();
+		ra_notify_urgent("** GAME COMPLETED! **\n\nCongratulations!", 5000, 1);
 		break;
 
 	case RC_CLIENT_EVENT_RESET:
@@ -1288,8 +1287,7 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 			ra_format_text(title, title_buf, sizeof(title_buf), 28, 28, 2);
 			char buf[NOTIF_TEXT_MAX];
 			snprintf(buf, sizeof(buf), "** SUBSET %s! **\n\n%s", verb, title_buf);
-			ra_notify_urgent(buf, 5000);
-			ra_play_achievement_sound();
+			ra_notify_urgent(buf, 5000, 1);
 		}
 		break;
 
