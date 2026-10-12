@@ -237,6 +237,22 @@ int      ra_snes_addrlist_prune_dynamic(void *map);
 // Cap the rtquery busy-wait (iterations). <=0 restores the 100k default.
 // On timeout a 20ms cooldown suppresses further queries (fail-fast).
 void     ra_rtquery_set_spin_limit(int iters);
+// Cap the rtquery busy-wait by wall time instead (microseconds; 0 = use the
+// iteration limit). The iteration default can hold the main loop ~100ms,
+// which starves anything the loop serves in real time (e.g. PSX CD sectors).
+void     ra_rtquery_set_timeout_us(uint32_t us);
+// 1 if the most recent ra_rtquery_read timed out or failed fast in cooldown
+// (its 0 result is not a real value).
+int      ra_rtquery_last_failed(void);
+
+// Latency statistics since the last reset (diagnostics).
+typedef struct {
+	uint32_t count;      // queries answered
+	uint32_t failed;     // timeouts + cooldown fail-fasts
+	uint64_t total_us;   // busy-wait time spent, answered + timed out
+	uint32_t max_us;     // slowest single query
+} ra_rtquery_stats_t;
+void     ra_rtquery_get_stats(ra_rtquery_stats_t *out, int reset);
 
 // Print a full diagnostic dump of the DDRAM mirror state to stdout and optional log file.
 // Includes: header validation, frame counter, region descriptors, hex dump of first bytes.

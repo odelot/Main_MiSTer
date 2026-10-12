@@ -3409,6 +3409,7 @@ void user_io_poll()
 					if (blksz == 2352 && is_psx())
 					{
 						diskled_on();
+						RaProbeScope p(RA_PROBE_CD);
 						psx_read_cd(buffer[disk], lba, buf_n);
 						done = 1;
 						buffer_lba[disk] = lba;
@@ -3498,6 +3499,7 @@ void user_io_poll()
 					lba += blks;
 					if (blksz == 2352 && is_psx())
 					{
+						RaProbeScope p(RA_PROBE_CD);
 						psx_read_cd(buffer[disk], lba, buf_n);
 						buffer_lba[disk] = lba;
 					}

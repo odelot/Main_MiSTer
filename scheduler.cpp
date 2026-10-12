@@ -32,11 +32,11 @@ static void scheduler_co_poll(void)
 
 		{
 			SPIKE_SCOPE("co_poll", 1000);
-			user_io_poll();
-			frame_timer();
-			input_poll(0);
+			{ RaProbeScope p(RA_PROBE_UIO);   user_io_poll(); }
+			{ RaProbeScope p(RA_PROBE_FRAME); frame_timer(); }
+			{ RaProbeScope p(RA_PROBE_INPUT); input_poll(0); }
 			achievements_poll();
-			video_poll();
+			{ RaProbeScope p(RA_PROBE_VIDEO); video_poll(); }
 		}
 
 		scheduler_yield();
@@ -49,6 +49,7 @@ static void scheduler_co_ui(void)
 	{
 		{
 			SPIKE_SCOPE("co_ui", 1000);
+			RaProbeScope p(RA_PROBE_UI);
 			HandleUI();
 			OsdUpdate();
 		}

@@ -915,6 +915,35 @@ void ra_rtquery_set_spin_limit(int iters)
 	RA_DBG("RTQuery: spin limit set to %d iterations", s_rtquery_spin_limit);
 }
 
+// Wall-time cap for the busy-wait (0 = iteration limit only).
+static uint32_t s_rtquery_timeout_us = 0;
+static int s_rtq_last_failed = 0;
+static ra_rtquery_stats_t s_rtq_stats = {};
+
+void ra_rtquery_set_timeout_us(uint32_t us)
+{
+	s_rtquery_timeout_us = us;
+	RA_DBG("RTQuery: timeout set to %u us", us);
+}
+
+int ra_rtquery_last_failed(void)
+{
+	return s_rtq_last_failed;
+}
+
+void ra_rtquery_get_stats(ra_rtquery_stats_t *out, int reset)
+{
+	if (out) *out = s_rtq_stats;
+	if (reset) memset(&s_rtq_stats, 0, sizeof(s_rtq_stats));
+}
+
+static inline uint64_t rtq_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
 void ra_rtquery_init(void *map)
 {
         // s_rtquery_seq is intentionally NOT reset: it keeps counting (mod 256,
@@ -966,6 +995,7 @@ void ra_clear_en_clear(void *map)
 
 uint32_t ra_rtquery_read(void *map, uint32_t address, uint32_t num_bytes)
 {
+        s_rtq_last_failed = 1;
         if (!map || num_bytes == 0 || num_bytes > 4) return 0;
 
         // Inside a post-timeout cooldown window: fail fast (returns 0, which
@@ -974,8 +1004,10 @@ uint32_t ra_rtquery_read(void *map, uint32_t address, uint32_t num_bytes)
                 struct timespec now;
                 clock_gettime(CLOCK_MONOTONIC, &now);
                 if (now.tv_sec < s_rtq_cooldown.tv_sec ||
-                    (now.tv_sec == s_rtq_cooldown.tv_sec && now.tv_nsec < s_rtq_cooldown.tv_nsec))
+                    (now.tv_sec == s_rtq_cooldown.tv_sec && now.tv_nsec < s_rtq_cooldown.tv_nsec)) {
+                        s_rtq_stats.failed++;
                         return 0;
+                }
                 s_rtq_cooldown.tv_sec = 0;
                 s_rtq_cooldown.tv_nsec = 0;
         }
@@ -998,14 +1030,26 @@ uint32_t ra_rtquery_read(void *map, uint32_t address, uint32_t num_bytes)
         ctrl->request_seq = s_rtquery_seq;
         __sync_synchronize();
 
-        // Busy-wait for FPGA response (typically 5-50µs)
+        // Busy-wait for FPGA response (typically 5-50µs). With a wall-time
+        // cap set, the clock is sampled every 32 spins (the iteration limit
+        // still applies as a backstop).
         volatile ra_query_ctrl_t *vctrl = (volatile ra_query_ctrl_t *)ctrl;
         int timeout = s_rtquery_spin_limit;
+        uint64_t t_start = rtq_now_us();
+        uint64_t deadline = s_rtquery_timeout_us ? t_start + s_rtquery_timeout_us : 0;
         while (vctrl->response_seq != s_rtquery_seq && --timeout > 0) {
-                // Spin
+                if (deadline && !(timeout & 31) && rtq_now_us() >= deadline) {
+                        timeout = 0;
+                        break;
+                }
         }
 
+        uint32_t waited_us = (uint32_t)(rtq_now_us() - t_start);
+        s_rtq_stats.total_us += waited_us;
+        if (waited_us > s_rtq_stats.max_us) s_rtq_stats.max_us = waited_us;
+
         if (timeout <= 0) {
+                s_rtq_stats.failed++;
                 // Timeout — FPGA didn't respond. Enter a 20ms cooldown so the
                 // main loop is not held by back-to-back dead queries.
                 struct timespec now;
@@ -1025,6 +1069,8 @@ uint32_t ra_rtquery_read(void *map, uint32_t address, uint32_t num_bytes)
                 value &= (1u << (num_bytes * 8)) - 1;
         }
 
+        s_rtq_stats.count++;
+        s_rtq_last_failed = 0;
         return value;
 }
 

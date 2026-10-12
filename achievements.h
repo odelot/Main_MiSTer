@@ -114,6 +114,7 @@ int achievements_gba_reset_ram(void);   // 1 = clear IWRAM+EWRAM on game load (r
 int achievements_recollect_interval(void);
 int achievements_smart_cache_enabled(void);
 int achievements_n64_snapshot_enabled(void);
+int achievements_psx_blanking_sync(void); // 1 = PSX RA DDR3 traffic only during blanking (retroachievements.cfg: psx_blanking_sync)
 
 // Debug watch list from retroachievements.cfg (watch=<hex>,<hex>,...).
 // Returns the count and sets *addrs to the RA-address array. Console handlers
@@ -135,5 +136,28 @@ int achievements_trigger_dump(void);
 // plus a 20ms fail-fast cooldown after a timeout) so no spin can delay
 // input forwarding.
 int achievements_justifier_test(void);
+
+// Main-loop stall probe (retroachievements.cfg debug=1; no-op otherwise).
+// The scheduler and the disc read path tag sections of the main loop so a
+// stall between two achievements_poll calls can be attributed in the RA log.
+enum {
+	RA_PROBE_UIO,    // user_io_poll (includes RA_PROBE_CD)
+	RA_PROBE_CD,     // PSX disc image read (buffer refill)
+	RA_PROBE_FRAME,  // frame_timer
+	RA_PROBE_INPUT,  // input_poll
+	RA_PROBE_VIDEO,  // video_poll
+	RA_PROBE_UI,     // co_ui: HandleUI + OsdUpdate
+	RA_PROBE_COUNT
+};
+uint64_t achievements_probe_begin(void);  // 0 when the probe is off
+void     achievements_probe_end(int section, uint64_t begin);
+
+struct RaProbeScope
+{
+	int section;
+	uint64_t begin;
+	RaProbeScope(int s) : section(s), begin(achievements_probe_begin()) {}
+	~RaProbeScope() { if (begin) achievements_probe_end(section, begin); }
+};
 
 #endif // ACHIEVEMENTS_H

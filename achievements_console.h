@@ -59,6 +59,12 @@ typedef struct {
 	// (cheats blocked, restore-state blocked via status register in hardware).
 	// Used as static guard before the dynamic FPGA capability-bit check.
 	int hardcore_protected;
+
+	// Push retroachievements.cfg feature toggles to hidden core status bits
+	// (NULL = none). Called once per core load, after the config is parsed.
+	// Must write every bit it owns (on and off) so a stale value restored
+	// from the core's own config never survives.
+	void (*apply_features)(void);
 } console_handler_t;
 
 // Console handlers (implemented in separate files)

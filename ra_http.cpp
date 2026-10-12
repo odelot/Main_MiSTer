@@ -60,6 +60,7 @@ static pthread_mutex_t s_resp_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t s_worker;
 static bool s_quit = false;
 static bool s_inited = false;
+static volatile int s_executing = 0; // 1 while the worker runs curl (diagnostics only)
 static char s_user_agent[256] = "MiSTer";
 
 static int queue_count(int head, int tail)
@@ -310,7 +311,9 @@ static void *http_worker(void *)
 		// Execute HTTP
 		ra_http_resp resp;
 		memset(&resp, 0, sizeof(resp));
+		s_executing = 1;
 		execute_request(&req, &resp);
+		s_executing = 0;
 
 		// Free request strings
 		free(req.url);
@@ -469,6 +472,11 @@ int ra_http_poll(void)
 	pthread_mutex_unlock(&s_resp_mutex);
 
 	return dispatched;
+}
+
+int ra_http_executing(void)
+{
+	return s_executing;
 }
 
 int ra_http_pending(void)

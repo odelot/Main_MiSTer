@@ -42,6 +42,10 @@ int ra_http_poll(void);
 // Returns number of requests currently in-flight (queued + executing).
 int ra_http_pending(void);
 
+// 1 while the worker thread is executing a request (curl running). Racy by
+// design — only used to tag main-loop stall diagnostics.
+int ra_http_executing(void);
+
 // Set the User-Agent header sent with every request.
 // Must be called before ra_http_request(). Not thread-safe — call from main thread.
 void ra_http_set_user_agent(const char *user_agent);
