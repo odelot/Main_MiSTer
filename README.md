@@ -17,7 +17,7 @@ This is a fork of the official [MiSTer Main binary](https://github.com/MiSTer-de
 | Master System / Game Gear | 11 / 15 | ✅ Supported | [odelot/SMS_MiSTer](https://github.com/odelot/SMS_MiSTer) |
 | Gameboy / Gameboy Color | 4 / 6 | ✅ Supported | [odelot/Gameboy_MiSTer](https://github.com/odelot/Gameboy_MiSTer) |
 | Virtual Boy | 28 | ✅ Supported | [odelot/VirtualBoy_MiSTer](https://github.com/odelot/VirtualBoy_MiSTer) |
-| GBA (Game Boy Advance) | 5 | HC wired, pending validation | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
+| GBA (Game Boy Advance) | 5 | ✅ Supported | [odelot/GBA_MiSTer](https://github.com/odelot/GBA_MiSTer) |
 | Mega CD / Sega CD | 9 | HC wired, pending validation | [odelot/MegaCD_MiSTer](https://github.com/odelot/MegaCD_MiSTer) |
 | TurboGrafx-16 / PC Engine (incl. CD) | 8 / 76 | HC wired, pending validation | [odelot/TurboGrafx16_MiSTer](https://github.com/odelot/TurboGrafx16_MiSTer) |
 | Sega 32X | 10 | HC wired, pending validation | [odelot/S32X_MiSTer](https://github.com/odelot/S32X_MiSTer) |
@@ -138,8 +138,8 @@ Hardcore is only actually engaged on cores that enforce the restrictions **in ha
 
 | Status | Cores | Meaning |
 |--------|-------|---------|
-| ✅ **Supported** | NES, FDS, SNES, Genesis/MD, N64, PSX, GB/GBC, SMS/GG, Virtual Boy | FPGA guardrails validated; `hardcore=1` engages real hardcore (cheats disabled, restore-state blocked in hardware) |
-| **HC wired, pending validation** | GBA, MegaCD, TG16, 32X | The core RTL has the hardcore guardrails and Main maps the status bits, but the homologation checklist isn't complete - these cores still run casual unless you set `force_hardcore=1` (for testing at your own risk) |
+| ✅ **Supported** | NES, FDS, SNES, Genesis/MD, N64, PSX, GB/GBC, SMS/GG, Virtual Boy, GBA | FPGA guardrails validated; `hardcore=1` engages real hardcore (cheats disabled, restore-state blocked in hardware) |
+| **HC wired, pending validation** | MegaCD, TG16, 32X | The core RTL has the hardcore guardrails and Main maps the status bits, but the homologation checklist isn't complete - these cores still run casual unless you set `force_hardcore=1` (for testing at your own risk) |
 | - **casual only** | NeoGeo, Atari 2600/7800, Saturn | No hardcore bits wired (2600/7800/Saturn cores have no cheat engine / savestates to block; NeoGeo pending) |
 
 Per-core enforcement details (status bits written by Main):
@@ -254,8 +254,11 @@ Key points:
 - The RA base stays at 0x38000000 to avoid the N64 savestate slots at 0x3C000000–0x3FFFFFFF.
 
 #### PSX - Smart Cache + Realtime Query + flat mirror (`ra_ram_mirror_psx.sv`)
-PSX uses selective-address transport with Smart Cache + RTQuery (default on), plus an ARM-side optimization: a **flat 2 MB mirror keyed by address** (O(1) lookup instead of binary search) that is refreshed from the FPGA value cache once per VBlank, but only when the FPGA has confirmed the current list revision, so ordering changes can never corrupt it.
-- **Main RAM** ($000000–$1FFFFF) - 2 MB
+PSX uses selective-address transport with Smart Cache + RTQuery (default on), plus an ARM-side optimization: a **flat mirror keyed by address** covering the whole RA map (O(1) lookup instead of binary search) that is refreshed from the FPGA value cache once per VBlank, but only when the FPGA has confirmed the current list revision, so ordering changes can never corrupt it.
+- **Main RAM** ($000000–$1FFFFF) - 2 MB (SDRAM, channel 4)
+- **Scratchpad** ($200000–$2003FF) - 1 KB. Both ports of the CPU's scratchpad BRAM are taken, so `cpu.vhd` keeps a write-only shadow copy (every CPU store and savestate restore is replayed into it) whose free port serves RA
+
+Addresses above the map read 0 (they used to wrap back into Main RAM).
 
 Cache misses are resolved live through the RTQuery mailbox; a growth-gated cleanup (~every 10 s, only if the list grew >50% over the bootstrap baseline) re-collects and prunes stale entries. Newly collected addresses stay unmonitored until they get a real value, self-healing via RTQuery misses.
 
@@ -270,8 +273,9 @@ Selective address reading with RTQuery mailbox; Smart Cache on by default, with 
 - **Work RAM** ($000000–$001FFF) - 8 KB (BRAM Port B via `pce_top`)
 - **CD RAM** ($002000–$011FFF) - 64 KB (DDRAM)
 - **Super CD RAM** ($012000–$041FFF) - 192 KB (DDRAM)
+- **CD Backup RAM** ($042000–$0427FF) - 2 KB (port B of the backup RAM BRAM, shared with the `.sav` load/save; RA only uses it outside those transfers)
 
-The core's `ddram.sv` was extended with an RA arbiter that gives RA secondary priority behind the core. Supports both HuCard-only games (8 KB) and CD-ROM/Super CD-ROM titles (up to 264 KB; PCE-CD games use console ID 76). Total exposed: **264 KB**.
+The core's `ddram.sv` was extended with an RA arbiter that gives RA secondary priority behind the core. Supports both HuCard-only games (8 KB) and CD-ROM/Super CD-ROM titles (up to 266 KB; PCE-CD games use console ID 76). Total exposed: **266 KB**.
 
 #### Atari 2600 (via Atari7800 core) - Full Mirror (`ra_riot_mirror.sv`)
 The simplest mirror in the project - the entire 128-byte RIOT (M6532) internal RAM is copied to DDRAM on every VBlank. No address list or handshake is needed.
@@ -364,6 +368,7 @@ All options live in `/media/fat/retroachievements.cfg`:
 | `stall_recovery` | 0 | Re-bootstrap automatically if the FPGA stops responding ≥5 s |
 | `n64_snapshot` | 0 | N64: evaluate against an 8 MB RDRAM snapshot per VBlank |
 | `gba_reset_ram` | 1 | GBA: clear IWRAM/EWRAM and fill flash with `0xFF` before each game load |
+| `psx_blanking_sync` | 1 | PSX: dispatch RA DDR3 traffic only during horizontal/vertical blanking, so it cannot add analog noise (banding) to visible scanout on RGB/CRT setups. RA requests are only delayed (≤ ~1 scanline), never dropped |
 | `watch` | - | Debug: comma-separated RA addresses to log on change |
 | `debug` | 0 | Verbose RA logging |
 

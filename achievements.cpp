@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netdb.h>
@@ -230,8 +231,17 @@ static void ra_log_apply_config(void)
 {
 	if (g_async_log && !s_logq_running) {
 		s_logq_quit = 0;
-		if (pthread_create(&s_logq_thread, NULL, ra_log_thread, NULL) == 0)
+		// Core #0, like the HTTP worker: a default thread would inherit the
+		// main loop's core #1 and compete with it while debugging stalls.
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		cpu_set_t cpuset;
+		CPU_ZERO(&cpuset);
+		CPU_SET(0, &cpuset);
+		pthread_attr_setaffinity_np(&attr, sizeof(cpuset), &cpuset);
+		if (pthread_create(&s_logq_thread, &attr, ra_log_thread, NULL) == 0)
 			s_logq_running = 1;
+		pthread_attr_destroy(&attr);
 	} else if (!g_async_log && s_logq_running) {
 		ra_log_drain();
 		pthread_mutex_lock(&s_logq_mutex);
@@ -372,6 +382,7 @@ static int g_justifier_test            = 0;  // 1 = MegaDrive only: cap rtquery 
 static int g_desc_ticker               = 0;  // 1 = scroll the selected achievement's description on a ticker row in the list view (retroachievements.cfg: list_desc_ticker)
 static int g_list_hotkey               = 0;  // 1 = in-game gamepad shortcut (Menu + Y) opens the achievement list (retroachievements.cfg: list_hotkey)
 static int g_popup_pos                 = INFO_ALIGN_LEFT; // popup corner: left (default) / center / right (retroachievements.cfg: popup_position)
+static int g_psx_blanking_sync         = 1;  // 1 = PSX core dispatches RA DDR3 traffic only during blanking (retroachievements.cfg: psx_blanking_sync)
 
 // Debug watch list (retroachievements.cfg: watch=19807d,19795a — RA addresses
 // in hex). Handlers log every value change of these addresses per frame.
@@ -514,6 +525,12 @@ static int  s_instant_duration_ms = 3000;
 static int  s_instant_pending = 0;
 static int  s_instant_showing = 0;
 static unsigned long s_instant_timer = 0;
+static unsigned long s_instant_next_ok = 0; // earliest time the next instant may redraw
+
+// Minimum spacing between instant redraws. Each one rewrites the whole OSD
+// (16 lines, ~4KB over the slow HPS bridge) on the main loop, and a
+// counter-driven progress or tracker can change every frame.
+#define INSTANT_MIN_INTERVAL_MS 500
 
 // Add to urgent queue (never dropped by instant notifications)
 static void ra_notify_urgent(const char *text, int duration_ms = 4000, int play_sound = 0)
@@ -575,12 +592,17 @@ static void ra_osd_poll(void)
 		return;
 	}
 
-	// Tier 2: instant slot — show immediately; discard if urgent is on screen
+	// Tier 2: instant slot — show immediately; discard if urgent is on screen.
+	// Within INSTANT_MIN_INTERVAL_MS of the last redraw the update stays
+	// pending (last wins), so the latest value is still shown.
 	if (s_instant_pending) {
+		if (!s_urgent_showing && s_instant_next_ok && !CheckTimer(s_instant_next_ok))
+			return;
 		s_instant_pending = 0;
 		if (!s_urgent_showing) {
 			InfoAligned(s_instant_text, s_instant_duration_ms + 500, g_popup_pos, 1);
 			s_instant_timer   = GetTimer(s_instant_duration_ms);
+			s_instant_next_ok = GetTimer(INSTANT_MIN_INTERVAL_MS);
 			s_instant_showing = 1;
 			RA_LOG("OSD: Showing instant notification (%dms)", s_instant_duration_ms);
 		} else {
@@ -798,6 +820,8 @@ static int ra_load_credentials(void)
 			g_list_hotkey = atoi(val);
 		} else if (!strcasecmp(key, "popup_position")) {
 			g_popup_pos = ra_parse_popup_pos(val);
+		} else if (!strcasecmp(key, "psx_blanking_sync")) {
+			g_psx_blanking_sync = atoi(val);
 		} else if (!strcasecmp(key, "smart_cleanup")) {
 			g_smart_cleanup = atoi(val);
 		} else if (!strcasecmp(key, "justifier_test")) {
@@ -829,11 +853,11 @@ static int ra_load_credentials(void)
 	}
 
 	RA_LOG("Credentials loaded: user=%s password=***(%zu chars)", g_ra_user, strlen(g_ra_password));
-	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d show_leaderboards_updates=%d show_leaderboards_submission=%d leaderboards_enabled(deprecated)=%d hardcore=%d force_hardcore=%d stall_recovery=%d rtquery=%d recollect=%d smart_cache=%d smart_cleanup=%d justifier_test=%d n64_snapshot=%d gba_reset_ram=%d multiline_desc=%d list_desc_ticker=%d list_hotkey=%d popup_position=%s debug=%d async_log=%d",
+	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d show_leaderboards_updates=%d show_leaderboards_submission=%d leaderboards_enabled(deprecated)=%d hardcore=%d force_hardcore=%d stall_recovery=%d rtquery=%d recollect=%d smart_cache=%d smart_cleanup=%d justifier_test=%d n64_snapshot=%d gba_reset_ram=%d multiline_desc=%d list_desc_ticker=%d list_hotkey=%d popup_position=%s psx_blanking_sync=%d debug=%d async_log=%d",
                 g_show_challenge_show_popup, g_show_challenge_hide_popup,
                 g_show_progress_popups, g_show_progress_name,
 		g_show_leaderboards_updates, g_show_leaderboards_submission, g_leaderboards_enabled,
-                g_hardcore, g_force_hardcore, g_stall_recovery, g_rtquery_enabled, g_recollect_interval, g_smart_cache, g_smart_cleanup, g_justifier_test, g_n64_snapshot, g_gba_reset_ram, g_multiline_desc, g_desc_ticker, g_list_hotkey, ra_popup_pos_name(g_popup_pos), g_ra_debug, g_async_log);
+                g_hardcore, g_force_hardcore, g_stall_recovery, g_rtquery_enabled, g_recollect_interval, g_smart_cache, g_smart_cleanup, g_justifier_test, g_n64_snapshot, g_gba_reset_ram, g_multiline_desc, g_desc_ticker, g_list_hotkey, ra_popup_pos_name(g_popup_pos), g_psx_blanking_sync, g_ra_debug, g_async_log);
 	return 1;
 }
 
@@ -1118,8 +1142,9 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 	case RC_CLIENT_EVENT_ACHIEVEMENT_PROGRESS_INDICATOR_UPDATE:
 		{
 			RA_LOG("PROGRESS: %s — %s", event->achievement->title, event->achievement->measured_progress);
-			// Dump all cached values on progress events
-			if (g_ra_map) {
+			// Dump all cached values on progress events (debug only: a
+			// counter-driven progress can fire every frame)
+			if (g_ra_debug && g_ra_map) {
 				int cnt = ra_snes_addrlist_count();
 				const uint32_t *addrs = ra_snes_addrlist_addrs();
 				for (int i = 0; i < cnt; i++) {
@@ -1636,6 +1661,11 @@ void achievements_init(void)
 	// synchronous — and with debug defaulting to 0, silent).
 	ra_log_apply_config();
 
+	// Feature toggles backed by hidden core status bits. Needs the parsed
+	// config, so it cannot ride along with the set_hardcore call above.
+	if (g_active_handler->apply_features)
+		g_active_handler->apply_features();
+
 #ifdef HAS_RCHEEVOS
 	// Create rc_client
 	g_client = rc_client_create(ra_read_memory, ra_server_call);
@@ -1877,7 +1907,46 @@ static int ra_save_io_active(void)
 	return ms < RA_SAVE_IO_GRACE_MS;
 }
 
-void achievements_poll(void)
+// ---------------------------------------------------------------------------
+// Main-loop stall probe (debug=1 only)
+//
+// The main loop also serves time-critical core I/O between polls — notably
+// PSX CD sectors, fetched on demand (~1 per 6.7ms at 2x); one served late
+// pauses the whole core. The probe times each achievements_poll and the gap
+// since the previous one (the rest of the loop: user_io_poll with the sector
+// transfers, input, UI) and logs every call that could have starved it.
+// ---------------------------------------------------------------------------
+
+#define RA_STALL_POLL_US 1500  // achievements_poll itself
+#define RA_STALL_GAP_US  4000  // rest of the main loop between two polls
+
+static uint32_t s_probe_http_us = 0;
+static uint32_t s_probe_osd_us  = 0;
+
+// Main-loop sections timed since the last achievements_poll (see RA_PROBE_*)
+static uint32_t s_probe_sec_us[RA_PROBE_COUNT] = {};
+static uint32_t s_probe_cd_reads = 0;
+
+static inline uint64_t ra_now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+uint64_t achievements_probe_begin(void)
+{
+	return g_ra_debug ? ra_now_us() : 0;
+}
+
+void achievements_probe_end(int section, uint64_t begin)
+{
+	if (section < 0 || section >= RA_PROBE_COUNT) return;
+	s_probe_sec_us[section] += (uint32_t)(ra_now_us() - begin);
+	if (section == RA_PROBE_CD) s_probe_cd_reads++;
+}
+
+static void ra_poll_impl(void)
 {
 	static uint32_t poll_calls = 0;
 	poll_calls++;
@@ -1899,10 +1968,17 @@ void achievements_poll(void)
 
 	// Always pump HTTP responses (even if mirror not validated yet,
 	// because login/game-load responses need to be processed)
+	uint64_t t_probe = g_ra_debug ? ra_now_us() : 0;
 	ra_http_poll();
+	if (g_ra_debug) {
+		uint64_t t = ra_now_us();
+		s_probe_http_us = (uint32_t)(t - t_probe);
+		t_probe = t;
+	}
 
 	// Show queued OSD notifications (achievement popups, etc.)
 	ra_osd_poll();
+	if (g_ra_debug) s_probe_osd_us = (uint32_t)(ra_now_us() - t_probe);
 
 	// RC_CLIENT_EVENT_RESET: the runtime asked for a system reset (hardcore
 	// enabled with a game loaded) and stays disabled until rc_client_reset
@@ -2113,6 +2189,73 @@ void achievements_poll(void)
 	}
 }
 
+void achievements_poll(void)
+{
+	if (!g_ra_debug) {
+		ra_poll_impl();
+		return;
+	}
+
+	static uint64_t last_exit = 0, win_start = 0;
+	static uint32_t win_max_poll = 0, win_max_gap = 0, win_stalls = 0;
+	static struct rusage ru_prev = {};
+
+	uint64_t t0 = ra_now_us();
+	uint32_t gap = last_exit ? (uint32_t)(t0 - last_exit) : 0;
+	// Context switches of the main thread since the previous poll: voluntary
+	// = it blocked (I/O, sleep), involuntary = something else took core #1.
+	struct rusage ru;
+	getrusage(RUSAGE_THREAD, &ru);
+	long csw_vol = ru.ru_nvcsw - ru_prev.ru_nvcsw;
+	long csw_inv = ru.ru_nivcsw - ru_prev.ru_nivcsw;
+	ru_prev = ru;
+	uint32_t sec[RA_PROBE_COUNT];
+	memcpy(sec, s_probe_sec_us, sizeof(sec));
+	uint32_t cd_reads = s_probe_cd_reads;
+	ra_rtquery_stats_t q0;
+	ra_rtquery_get_stats(&q0, 0);
+	int curl = ra_http_executing();
+	s_probe_http_us = s_probe_osd_us = 0;
+
+	ra_poll_impl();
+
+	uint64_t t1 = ra_now_us();
+	uint32_t dur = (uint32_t)(t1 - t0);
+	last_exit = t1;
+	if (dur > win_max_poll) win_max_poll = dur;
+	if (gap > win_max_gap) win_max_gap = gap;
+
+	if (dur > RA_STALL_POLL_US || gap > RA_STALL_GAP_US) {
+		ra_rtquery_stats_t q1;
+		ra_rtquery_get_stats(&q1, 0);
+		uint32_t rest = dur - s_probe_http_us - s_probe_osd_us;
+		uint32_t tagged = sec[RA_PROBE_UIO] + sec[RA_PROBE_FRAME] + sec[RA_PROBE_INPUT]
+			+ sec[RA_PROBE_VIDEO] + sec[RA_PROBE_UI];
+		win_stalls++;
+		RA_LOG("STALL: poll=%uus [http=%u osd=%u handler=%u rtq=%u fail=%u wait=%lluus] gap_before=%uus [uio=%u (cd=%u x%u) frm=%u inp=%u vid=%u ui=%u other=%d] csw[vol=%ld inv=%ld] curl=%d",
+			dur, s_probe_http_us, s_probe_osd_us, rest,
+			q1.count - q0.count, q1.failed - q0.failed,
+			(unsigned long long)(q1.total_us - q0.total_us),
+			gap, sec[RA_PROBE_UIO], sec[RA_PROBE_CD], cd_reads,
+			sec[RA_PROBE_FRAME], sec[RA_PROBE_INPUT], sec[RA_PROBE_VIDEO], sec[RA_PROBE_UI],
+			(int)gap - (int)tagged, csw_vol, csw_inv,
+			curl | ra_http_executing());
+	}
+	memset(s_probe_sec_us, 0, sizeof(s_probe_sec_us));
+	s_probe_cd_reads = 0;
+
+	if (!win_start) win_start = t1;
+	if (t1 - win_start >= 10000000ULL) {
+		ra_rtquery_stats_t q;
+		ra_rtquery_get_stats(&q, 1);
+		RA_LOG("LOOP(10s): max_poll=%uus max_gap=%uus stalls=%u rtq=%u fail=%u avg=%lluus max=%uus",
+			win_max_poll, win_max_gap, win_stalls, q.count, q.failed,
+			(unsigned long long)(q.count ? q.total_us / q.count : 0), q.max_us);
+		win_start = t1;
+		win_max_poll = win_max_gap = win_stalls = 0;
+	}
+}
+
 void achievements_unload_game(void)
 {
         if (!g_active_handler) return;
@@ -2320,6 +2463,11 @@ int achievements_smart_cache_enabled(void)
 int achievements_n64_snapshot_enabled(void)
 {
 	return g_n64_snapshot;
+}
+
+int achievements_psx_blanking_sync(void)
+{
+	return g_psx_blanking_sync;
 }
 
 int achievements_watch_list(const uint32_t **addrs)

@@ -85,7 +85,10 @@ static int g_psx_boot_zero = 0;
 // reads). Cache miss is detected by the monitored flag, not by the value
 // (0 is a valid value, so we can't use it as a miss sentinel).
 // ---------------------------------------------------------------------------
-#define PSX_RAM_SIZE       (2u * 1024u * 1024u)
+// Covers the whole rcheevos PSX map: 2 MB Main RAM (0x000000-0x1FFFFF) plus
+// the 1 KB scratchpad (0x200000-0x2003FF), so scratchpad addresses are
+// VBlank-cached like the rest instead of missing to rtquery on every read.
+#define PSX_RAM_SIZE       (0x200000u + 0x400u)
 static uint8_t g_psx_ram_mirror   [PSX_RAM_SIZE];
 static uint8_t g_psx_ram_monitored[PSX_RAM_SIZE];
 
@@ -266,19 +269,26 @@ static uint32_t psx_read_memory(void *map, uint32_t address, uint8_t *buffer, ui
 				// At least one miss: rtquery the missing bytes, mark them in the
 				// mirror so subsequent reads in this frame are cache hits, and
 				// schedule them for the next FPGA batch via add_dynamic.
+				// A failed query (timeout/cooldown) returns 0, which is not a
+				// real value: still schedule the address for the FPGA batch, but
+				// leave it unmonitored so the next read queries again instead
+				// of serving the 0 from the mirror.
 				if (num_bytes <= 4) {
 					g_psx_rtquery_calls++;
 					g_psx_rtquery_miss++;
 					uint32_t val = ra_rtquery_read(map, address, num_bytes);
+					int ok = !ra_rtquery_last_failed();
 					for (uint32_t i = 0; i < num_bytes; i++) {
 						if (miss_mask & (1u << i)) {
 							uint8_t b = (uint8_t)(val >> (i * 8));
 							buffer[i] = b;
 							g_psx_addmiss_total++;
 							ra_snes_addrlist_add_dynamic(address + i);
-							if ((address + i) < PSX_RAM_SIZE)
-								g_psx_ram_mirror[address + i] = b;
-							psx_mirror_mark_monitored(address + i);
+							if (ok) {
+								if ((address + i) < PSX_RAM_SIZE)
+									g_psx_ram_mirror[address + i] = b;
+								psx_mirror_mark_monitored(address + i);
+							}
 							g_psx_changes_since_cleanup++;
 						}
 					}
@@ -294,9 +304,11 @@ static uint32_t psx_read_memory(void *map, uint32_t address, uint8_t *buffer, ui
 						buffer[i] = b;
 						g_psx_addmiss_total++;
 						ra_snes_addrlist_add_dynamic(address + i);
-						if ((address + i) < PSX_RAM_SIZE)
-							g_psx_ram_mirror[address + i] = b;
-						psx_mirror_mark_monitored(address + i);
+						if (!ra_rtquery_last_failed()) {
+							if ((address + i) < PSX_RAM_SIZE)
+								g_psx_ram_mirror[address + i] = b;
+							psx_mirror_mark_monitored(address + i);
+						}
 						g_psx_changes_since_cleanup++;
 					}
 				}
@@ -695,6 +707,15 @@ static void psx_set_hardcore(int enabled)
 	ra_log_write("PSX: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
+static void psx_apply_features(void)
+{
+	// status[94] is active-low in the core (0 = blanking sync On), so the fix
+	// stays on even with a Main that never writes the bit.
+	int on = achievements_psx_blanking_sync();
+	user_io_status_set("[94]", on ? 0 : 1);
+	ra_log_write("PSX: RA blanking sync %s\n", on ? "ON" : "OFF");
+}
+
 static int psx_detect_protocol(void *map)
 {
 	if (!ra_ramread_active(map)) {
@@ -708,6 +729,11 @@ static int psx_detect_protocol(void *map)
 	if (ra_rtquery_supported(map) && achievements_rtquery_enabled()) {
 		g_psx_rtquery = 1;
 		ra_rtquery_init(map);
+		// The main loop also serves the core's CD sectors on demand, ~1 per
+		// 6.7ms at 2x; a late sector pauses the whole core (audible stutter).
+		// A healthy query answers in well under 1ms, so bound a dead mailbox
+		// to 4ms instead of the ~100ms iteration default.
+		ra_rtquery_set_timeout_us(4000);
 		ra_log_write("PSX: Realtime queries supported and ENABLED (FPGA v2+)\n");
 	} else if (ra_rtquery_supported(map)) {
 		g_psx_rtquery = 0;
@@ -733,5 +759,6 @@ const console_handler_t g_console_psx = {
 	.detect_protocol = psx_detect_protocol,
 	.console_id = 12,  // RC_CONSOLE_PLAYSTATION
 	.name = "PSX",
-	.hardcore_protected = 1
+	.hardcore_protected = 1,
+	.apply_features = psx_apply_features
 };
