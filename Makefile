@@ -138,12 +138,12 @@ endif
 $(BUILDDIR)/%.c.d: %.c
 	@mkdir -p $(dir $(BUILDDIR)/$*)
 	$(Q)$(info $< >> $@)
-	$(Q)$(CC) $(DFLAGS) -MM $< -MT $@ -MT $*.c.o -MF $@ 2>&1 | $(OUTPUT_FILTER)
+	$(Q)$(CC) $(DFLAGS) -MM $< -MT $@ -MT $(BUILDDIR)/$*.c.o -MF $@ 2>&1 | $(OUTPUT_FILTER)
 
 $(BUILDDIR)/%.cpp.d: %.cpp
 	@mkdir -p $(dir $(BUILDDIR)/$*)
 	$(Q)$(info $< >> $@)
-	$(Q)$(CC) $(DFLAGS) -MM $< -MT $@ -MT $*.cpp.o -MF $@ 2>&1 | $(OUTPUT_FILTER)
+	$(Q)$(CC) $(DFLAGS) -MM $< -MT $@ -MT $(BUILDDIR)/$*.cpp.o -MF $@ 2>&1 | $(OUTPUT_FILTER)
 
 # Ensure correct time stamp
 $(BUILDDIR)/main.cpp.o: $(filter-out $(BUILDDIR)/main.cpp.o, $(OBJ))
