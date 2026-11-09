@@ -124,8 +124,10 @@ int seladdr_frame_evaluable(void *map, const char *console_name);
 void gba_dump_trigger(uint32_t ach_id);
 
 // Print the rolling value-cache window captured by the Selective Address
-// handlers (see trigger_dump). Call from the achievement-triggered event so a
-// false unlock can be traced to the exact address and frame that moved.
+// handlers (see trigger_dump). Call from the achievement-triggered and
+// leaderboard-submitted events so a false trigger can be traced to the exact
+// address and frame that moved. The window is printed again a few frames later,
+// which is what tells a one-frame false read from a real change in RAM.
 void seladdr_trigdump_report(uint32_t ach_id, const char *title);
 
 #endif // ACHIEVEMENTS_CONSOLE_H

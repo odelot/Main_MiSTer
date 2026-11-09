@@ -27,6 +27,8 @@
 static console_state_t g_gba_state = {};
 static int g_gba_rtquery = 0; // 1 if FPGA supports realtime queries (core v2+)
 static void *g_gba_last_map = NULL;
+static uint8_t g_watch_last[16];
+static int     g_watch_init = 0;
 
 // ---------------------------------------------------------------------------
 // GBA Selective Address Diagnostics
@@ -86,12 +88,14 @@ static void gba_init(void)
 {
         memset(&g_gba_state, 0, sizeof(g_gba_state));
         g_gba_rtquery = 0;
+        g_watch_init = 0;
 }
 
 static void gba_reset(void)
 {
         memset(&g_gba_state, 0, sizeof(g_gba_state));
         g_gba_rtquery = 0;
+        g_watch_init = 0;
 }
 
 static uint32_t gba_read_memory(void *map, uint32_t address, uint8_t *buffer, uint32_t num_bytes)
@@ -238,8 +242,26 @@ static int gba_poll(void *map, void *client, int game_loaded)
                                 }
 
                                 // Skip frames whose VALCACHE ordering is unconfirmed (see helper).
-                                if (seladdr_frame_evaluable(map, "GBA"))
-                                    rc_client_do_frame(rc_client);
+                                if (seladdr_frame_evaluable(map, "GBA")) {
+                                        // Debug watch: sample the configured RA addresses through
+                                        // the same read path rcheevos uses, log every change.
+                                        const uint32_t *waddrs;
+                                        int wcount = achievements_watch_list(&waddrs);
+                                        if (wcount > 16) wcount = 16;
+                                        for (int i = 0; i < wcount; i++) {
+                                                uint8_t v = 0;
+                                                gba_read_memory(map, waddrs[i], &v, 1);
+                                                if (!g_watch_init || v != g_watch_last[i]) {
+                                                        ra_log_write("GBA WATCH f=%u 0x%05X: %02X->%02X\n",
+                                                                resp_frame, waddrs[i],
+                                                                g_watch_init ? g_watch_last[i] : v, v);
+                                                        g_watch_last[i] = v;
+                                                }
+                                        }
+                                        if (wcount) g_watch_init = 1;
+
+                                        rc_client_do_frame(rc_client);
+                                }
 
                                 // Dynamic-only prune (~1/min, only if dynamics piled up):
                                 // static bootstrap addresses stay; still-needed dynamics

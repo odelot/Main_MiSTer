@@ -12,7 +12,7 @@
 //   4. achievements_unload_game() — called when core changes or ROM unloads
 //   5. achievements_deinit() — called at shutdown
 //
-// Debug log is written to /tmp/ra_debug.log and stdout (magenta prefix "RA:")
+// With debug=1, the log is written to /tmp/ra_debug.log and stdout (magenta prefix "RA:")
 
 // Write a line to the RA log (stdout + /tmp/ra_debug.log). Safe to call from any thread.
 void ra_log_write(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -115,6 +115,7 @@ int achievements_recollect_interval(void);
 int achievements_smart_cache_enabled(void);
 int achievements_n64_snapshot_enabled(void);
 int achievements_psx_blanking_sync(void); // 1 = PSX RA DDR3 traffic only during blanking (retroachievements.cfg: psx_blanking_sync)
+int achievements_snes_sni_guard(void); // 1 = SNES RA WRAM reads only in a slot clear of CPU WRAM accesses (retroachievements.cfg: snes_sni_guard)
 
 // Debug watch list from retroachievements.cfg (watch=<hex>,<hex>,...).
 // Returns the count and sets *addrs to the RA-address array. Console handlers
@@ -137,7 +138,8 @@ int achievements_trigger_dump(void);
 // input forwarding.
 int achievements_justifier_test(void);
 
-// Main-loop stall probe (retroachievements.cfg debug=1; no-op otherwise).
+// Main-loop stall probe (retroachievements.cfg debug=1 + stall_log=1; no-op
+// otherwise).
 // The scheduler and the disc read path tag sections of the main loop so a
 // stall between two achievements_poll calls can be attributed in the RA log.
 enum {

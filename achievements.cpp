@@ -45,10 +45,13 @@
 // Debug logging
 // ---------------------------------------------------------------------------
 
+#define RA_LOG_PATH "/tmp/ra_debug.log"
+
 static FILE *g_logfile = NULL;
 static int g_ra_debug = 0; // forward decl — defined/loaded in ra_load_credentials
 static int g_async_log = 1; // retroachievements.cfg: async_log (1 = writer thread)
 static int g_trigger_dump = 1; // retroachievements.cfg: trigger_dump (needs debug=1)
+static int g_stall_log = 0; // retroachievements.cfg: stall_log (needs debug=1): main-loop STALL/LOOP probe
 
 #define RA_LOG(fmt, ...) ra_log_impl("RA: " fmt "\n", ##__VA_ARGS__)
 
@@ -142,6 +145,40 @@ static void *ra_log_thread(void *arg)
 	return NULL;
 }
 
+// Every log line passes through here, so a credential is masked no matter which
+// call formatted it. Runs after the length limit: a value cut short by it ends
+// at the newline, so no partial value survives.
+static void ra_log_mask_value(char *value, const char *stop)
+{
+	char *end = value;
+	while (*end && !strchr(stop, *end)) end++;
+	size_t n = end - value;
+	if (n > 3) n = 3;
+	memset(value, '*', n);
+	memmove(value + n, end, strlen(end) + 1);
+}
+
+static void ra_log_mask_secrets(char *line)
+{
+	static const char *const url_end = "&'\"]\r\n"; // URL-encoded, so no delimiter inside
+	static const char *const raw_end = "\r\n";      // a raw password can contain anything
+
+	for (char *eq = strchr(line, '='); eq; eq = strchr(eq + 1, '=')) {
+		size_t before = eq - line;
+		if (before >= 2 && (eq[-2] == '&' || eq[-2] == '?') && (eq[-1] == 'p' || eq[-1] == 't'))
+			ra_log_mask_value(eq + 1, url_end);
+		else if (before >= 8 && !strncasecmp(eq - 8, "password", 8))
+			ra_log_mask_value(eq + 1, raw_end);
+	}
+
+	// The quote check skips the search on bulk dump lines.
+	if (strchr(line, '"')) {
+		static const char key[] = "\"token\":\"";
+		for (char *p = strcasestr(line, key); p; p = strcasestr(p + sizeof(key) - 1, key))
+			ra_log_mask_value(p + sizeof(key) - 1, url_end);
+	}
+}
+
 // Format + hand off. Falls back to a synchronous write when the writer is not
 // running (toggle off, before startup, or after shutdown) so no line is lost.
 static void ra_log_emit(const char *fmt, va_list args)
@@ -152,11 +189,10 @@ static void ra_log_emit(const char *fmt, va_list args)
 
 	// Over-long line: vsnprintf dropped the tail including the newline. Mark
 	// the cut and restore the terminator so the next line still starts fresh.
-	size_t len = (size_t)n;
-	if (n >= (int)sizeof(line)) {
-		memcpy(line + sizeof(line) - 5, "...\n", 5);
-		len = sizeof(line) - 1;
-	}
+	if (n >= (int)sizeof(line)) memcpy(line + sizeof(line) - 5, "...\n", 5);
+
+	ra_log_mask_secrets(line);
+	size_t len = strlen(line);
 
 	if (!s_logq_running) {
 		ra_log_sink(line);
@@ -214,7 +250,9 @@ static void ra_log_drain(void)
 static void ra_log_open(void)
 {
 	if (!g_logfile) {
-		g_logfile = fopen("/tmp/ra_debug.log", "w");
+		// "e" = O_CLOEXEC. Every core load re-execs this binary (app_restart), and
+		// nothing closes the log first: without it each load leaks one descriptor.
+		g_logfile = fopen(RA_LOG_PATH, "we");
 		if (g_logfile) {
 			time_t now = time(NULL);
 			fprintf(g_logfile, "=== RetroAchievements Debug Log ===\n");
@@ -224,9 +262,9 @@ static void ra_log_open(void)
 	}
 }
 
-// Start/stop the writer to match async_log. Separate from ra_log_open because
-// the config (and with it the toggle) is parsed later during init; until this
-// runs, ra_log_emit falls back to synchronous writes.
+// Start/stop the writer to match async_log. Runs once the config (and with it
+// the toggle) is parsed; until then, ra_log_emit falls back to synchronous
+// writes.
 static void ra_log_apply_config(void)
 {
 	if (g_async_log && !s_logq_running) {
@@ -300,6 +338,18 @@ static void ra_crash_handler(int sig)
 		int n = backtrace(bt, 32);
 		backtrace_symbols_fd(bt, n, fileno(g_logfile));
 		fflush(g_logfile);
+	} else {
+		// debug=0 keeps no log open, but a crash is still worth recording. open()
+		// rather than fopen(): the latter allocates, and a corrupted heap is a
+		// likely reason to be here.
+		int fd = open(RA_LOG_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+		if (fd >= 0) {
+			dprintf(fd, "\n!!! CRASH: signal %s (%d) !!!\n", name, sig);
+			void *bt[32];
+			int n = backtrace(bt, 32);
+			backtrace_symbols_fd(bt, n, fd);
+			close(fd);
+		}
 	}
 
 	// Also print to stderr
@@ -383,6 +433,7 @@ static int g_desc_ticker               = 0;  // 1 = scroll the selected achievem
 static int g_list_hotkey               = 0;  // 1 = in-game gamepad shortcut (Menu + Y) opens the achievement list (retroachievements.cfg: list_hotkey)
 static int g_popup_pos                 = INFO_ALIGN_LEFT; // popup corner: left (default) / center / right (retroachievements.cfg: popup_position)
 static int g_psx_blanking_sync         = 1;  // 1 = PSX core dispatches RA DDR3 traffic only during blanking (retroachievements.cfg: psx_blanking_sync)
+static int g_snes_sni_guard            = 1;  // 1 (default) = SNES core starts RA WRAM reads only in a slot clear of CPU WRAM accesses (retroachievements.cfg: snes_sni_guard)
 
 // Debug watch list (retroachievements.cfg: watch=19807d,19795a — RA addresses
 // in hex). Handlers log every value change of these addresses per frame.
@@ -808,6 +859,8 @@ static int ra_load_credentials(void)
 			g_async_log = atoi(val);
 		} else if (!strcasecmp(key, "trigger_dump")) {
 			g_trigger_dump = atoi(val);
+		} else if (!strcasecmp(key, "stall_log")) {
+			g_stall_log = atoi(val);
 		} else if (!strcasecmp(key, "n64_snapshot")) {
 			g_n64_snapshot = atoi(val);
 		} else if (!strcasecmp(key, "gba_reset_ram")) {
@@ -822,6 +875,8 @@ static int ra_load_credentials(void)
 			g_popup_pos = ra_parse_popup_pos(val);
 		} else if (!strcasecmp(key, "psx_blanking_sync")) {
 			g_psx_blanking_sync = atoi(val);
+		} else if (!strcasecmp(key, "snes_sni_guard")) {
+			g_snes_sni_guard = atoi(val);
 		} else if (!strcasecmp(key, "smart_cleanup")) {
 			g_smart_cleanup = atoi(val);
 		} else if (!strcasecmp(key, "justifier_test")) {
@@ -841,6 +896,10 @@ static int ra_load_credentials(void)
 	}
 	fclose(f);
 
+	// Nothing was logged before this point (debug defaults to 0), so opening the
+	// file only now loses no lines.
+	if (g_ra_debug) ra_log_open();
+
 	/* Backward compatibility: transfer deprecated value only when both new keys are absent. */
 	if (!show_leaderboards_updates_defined && !show_leaderboards_submission_defined && legacy_leaderboards_defined) {
 		g_show_leaderboards_updates = g_leaderboards_enabled;
@@ -852,12 +911,19 @@ static int ra_load_credentials(void)
 		return 0;
 	}
 
-	RA_LOG("Credentials loaded: user=%s password=***(%zu chars)", g_ra_user, strlen(g_ra_password));
-	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d show_leaderboards_updates=%d show_leaderboards_submission=%d leaderboards_enabled(deprecated)=%d hardcore=%d force_hardcore=%d stall_recovery=%d rtquery=%d recollect=%d smart_cache=%d smart_cleanup=%d justifier_test=%d n64_snapshot=%d gba_reset_ram=%d multiline_desc=%d list_desc_ticker=%d list_hotkey=%d popup_position=%s psx_blanking_sync=%d debug=%d async_log=%d",
+	RA_LOG("Credentials loaded: user=%s", g_ra_user);
+	RA_LOG("Config: show_challenge_show=%d show_challenge_hide=%d show_progress=%d show_progress_name=%d show_leaderboards_updates=%d show_leaderboards_submission=%d leaderboards_enabled(deprecated)=%d hardcore=%d force_hardcore=%d stall_recovery=%d rtquery=%d recollect=%d smart_cache=%d smart_cleanup=%d justifier_test=%d n64_snapshot=%d gba_reset_ram=%d multiline_desc=%d list_desc_ticker=%d list_hotkey=%d popup_position=%s psx_blanking_sync=%d snes_sni_guard=%d debug=%d async_log=%d stall_log=%d",
                 g_show_challenge_show_popup, g_show_challenge_hide_popup,
                 g_show_progress_popups, g_show_progress_name,
 		g_show_leaderboards_updates, g_show_leaderboards_submission, g_leaderboards_enabled,
-                g_hardcore, g_force_hardcore, g_stall_recovery, g_rtquery_enabled, g_recollect_interval, g_smart_cache, g_smart_cleanup, g_justifier_test, g_n64_snapshot, g_gba_reset_ram, g_multiline_desc, g_desc_ticker, g_list_hotkey, ra_popup_pos_name(g_popup_pos), g_psx_blanking_sync, g_ra_debug, g_async_log);
+                g_hardcore, g_force_hardcore, g_stall_recovery, g_rtquery_enabled, g_recollect_interval, g_smart_cache, g_smart_cleanup, g_justifier_test, g_n64_snapshot, g_gba_reset_ram, g_multiline_desc, g_desc_ticker, g_list_hotkey, ra_popup_pos_name(g_popup_pos), g_psx_blanking_sync, g_snes_sni_guard, g_ra_debug, g_async_log, g_stall_log);
+	if (g_watch_count) {
+		char wl[RA_WATCH_MAX * 9 + 1];
+		int wp = 0;
+		for (int i = 0; i < g_watch_count; i++)
+			wp += snprintf(wl + wp, sizeof(wl) - wp, " %X", g_watch_addrs[i]);
+		RA_LOG("Config: watch (%d):%s", g_watch_count, wl);
+	}
 	return 1;
 }
 
@@ -985,19 +1051,10 @@ static void ra_server_call(const rc_api_request_t *request,
 {
 	(void)client;
 
-	// Log the request (mask token and password for security)
+	// Log the request (ra_log_mask_secrets hides token and password)
 	if (request->post_data) {
-		const char *token_pos = strstr(request->post_data, "&t=");
-		const char *pass_pos  = strstr(request->post_data, "&p=");
-		const char *mask_pos  = token_pos ? token_pos : pass_pos;
-		const char *mask_key  = token_pos ? "&t=" : "&p=";
-		if (mask_pos) {
-			int prefix_len = (int)(mask_pos - request->post_data);
-			RA_LOG("HTTP: POST %s [%.*s%s***]", request->url, prefix_len, request->post_data, mask_key);
-		} else {
-			RA_LOG("HTTP: POST %s [%.80s%s]", request->url,
-				request->post_data, strlen(request->post_data) > 80 ? "..." : "");
-		}
+		RA_LOG("HTTP: POST %s [%.80s%s]", request->url,
+			request->post_data, strlen(request->post_data) > 80 ? "..." : "");
 	} else {
 		RA_LOG("HTTP: GET %s", request->url);
 	}
@@ -1038,23 +1095,9 @@ static void ra_server_call(const rc_api_request_t *request,
 		rc_resp.body = hr->body ? hr->body : "";
 		rc_resp.body_length = hr->body_len;
 
-		// Log response body with token masked
-		{
-			char body_preview[220];
-			snprintf(body_preview, sizeof(body_preview), "%.200s", rc_resp.body);
-			// Mask "Token":"<value>" in response JSON
-			char *tp = strstr(body_preview, "\"Token\":\"");
-			if (tp) {
-				char *val_start = tp + 9; // skip "Token":"  (9 chars)
-				char *val_end = strchr(val_start, '"');
-				if (val_end) {
-					memmove(val_start + 3, val_end, strlen(val_end) + 1);
-					memcpy(val_start, "***", 3);
-				}
-			}
-			RA_LOG("HTTP response: status=%d body_len=%zu body=%s",
-				hr->http_status, hr->body_len, body_preview);
-		}
+		// Log response body (ra_log_mask_secrets hides the token)
+		RA_LOG("HTTP response: status=%d body_len=%zu body=%.200s",
+			hr->http_status, hr->body_len, rc_resp.body);
 
 		if (hr->http_status == 0) {
 			// curl failed entirely — mark as retryable
@@ -1211,11 +1254,22 @@ static void ra_event_handler(const rc_client_event_t *event, rc_client_t *client
 
         case RC_CLIENT_EVENT_LEADERBOARD_SUBMITTED:
 		{
-			if (!g_show_leaderboards_submission || !event->leaderboard)
+			if (!event->leaderboard)
                                 break;
 
-                        RA_LOG("LEADERBOARD SUBMITTED: [%u] %s",
-                                event->leaderboard->id, event->leaderboard->title);
+                        RA_LOG("LEADERBOARD SUBMITTED: [%u] %s = %s",
+                                event->leaderboard->id, event->leaderboard->title,
+                                event->leaderboard->tracker_value ? event->leaderboard->tracker_value : "-");
+
+                        // Same trace as a false unlock, and not tied to the popup
+                        // setting: a bogus score reaches the server either way.
+                        char td_title[96];
+                        snprintf(td_title, sizeof(td_title), "LB %s = %s", event->leaderboard->title,
+                                event->leaderboard->tracker_value ? event->leaderboard->tracker_value : "-");
+                        seladdr_trigdump_report(event->leaderboard->id, td_title);
+
+                        if (!g_show_leaderboards_submission)
+                                break;
 
                         const int title_max = 28;
                         char title_buf[32];
@@ -1376,6 +1430,19 @@ static void ra_login_callback(int result, const char *error_message,
 	} else {
 		RA_LOG("LOGIN FAILED: result=%d error=%s", result,
 			error_message ? error_message : "(none)");
+		// Without a popup the failure only reached the log and RA silently stayed off.
+		if (result == RC_INVALID_CREDENTIALS) {
+			ra_notify_urgent("RetroAchievements\n\n"
+				"Login failed:\n"
+				"wrong username or password\n"
+				"Check retroachievements.cfg", 4000);
+		} else if (result != RC_ABORTED) {
+			char reason[128], buf[NOTIF_TEXT_MAX];
+			ra_wrap_text(error_message ? error_message : "unknown error",
+				reason, sizeof(reason), 26, 3);
+			snprintf(buf, sizeof(buf), "RetroAchievements\n\nLogin failed:\n%s", reason);
+			ra_notify_urgent(buf, 4000);
+		}
 	}
 }
 
@@ -1592,8 +1659,6 @@ static void ra_hash_message(const char *msg)
 
 void achievements_init(void)
 {
-	ra_log_open();
-
 	// Install crash handlers to capture backtraces
 	signal(SIGSEGV, ra_crash_handler);
 	signal(SIGBUS,  ra_crash_handler);
@@ -1855,6 +1920,10 @@ void achievements_load_game(const char *rom_path, uint32_t crc32)
                 } else {
                         RA_LOG("Not logged in — game identified but achievements unavailable.");
                         RA_LOG("MD5: %s (can verify at retroachievements.org)", g_rom_md5);
+                        if (!g_has_credentials)
+                                ra_notify_urgent("RetroAchievements\n\n"
+                                        "Username/password missing\n"
+                                        "Check retroachievements.cfg", 4000);
                 }
         }
 #endif
@@ -1908,14 +1977,21 @@ static int ra_save_io_active(void)
 }
 
 // ---------------------------------------------------------------------------
-// Main-loop stall probe (debug=1 only)
+// Main-loop stall probe (debug=1 + stall_log=1)
 //
 // The main loop also serves time-critical core I/O between polls — notably
 // PSX CD sectors, fetched on demand (~1 per 6.7ms at 2x); one served late
 // pauses the whole core. The probe times each achievements_poll and the gap
 // since the previous one (the rest of the loop: user_io_poll with the sector
 // transfers, input, UI) and logs every call that could have starved it.
+//
+// Opt-in on top of debug=1: the thresholds are tuned for PSX, and a heavy set
+// keeps every achievements_poll above them on other cores — SMW's two sets
+// cost ~2.5ms per frame, so one STALL line per frame, ~40MB of /tmp (RAM) per
+// hour, burying the rest of the log.
 // ---------------------------------------------------------------------------
+
+static inline int ra_probe_on(void) { return g_ra_debug && g_stall_log; }
 
 #define RA_STALL_POLL_US 1500  // achievements_poll itself
 #define RA_STALL_GAP_US  4000  // rest of the main loop between two polls
@@ -1936,7 +2012,7 @@ static inline uint64_t ra_now_us(void)
 
 uint64_t achievements_probe_begin(void)
 {
-	return g_ra_debug ? ra_now_us() : 0;
+	return ra_probe_on() ? ra_now_us() : 0;
 }
 
 void achievements_probe_end(int section, uint64_t begin)
@@ -1968,9 +2044,9 @@ static void ra_poll_impl(void)
 
 	// Always pump HTTP responses (even if mirror not validated yet,
 	// because login/game-load responses need to be processed)
-	uint64_t t_probe = g_ra_debug ? ra_now_us() : 0;
+	uint64_t t_probe = ra_probe_on() ? ra_now_us() : 0;
 	ra_http_poll();
-	if (g_ra_debug) {
+	if (ra_probe_on()) {
 		uint64_t t = ra_now_us();
 		s_probe_http_us = (uint32_t)(t - t_probe);
 		t_probe = t;
@@ -1978,7 +2054,7 @@ static void ra_poll_impl(void)
 
 	// Show queued OSD notifications (achievement popups, etc.)
 	ra_osd_poll();
-	if (g_ra_debug) s_probe_osd_us = (uint32_t)(ra_now_us() - t_probe);
+	if (ra_probe_on()) s_probe_osd_us = (uint32_t)(ra_now_us() - t_probe);
 
 	// RC_CLIENT_EVENT_RESET: the runtime asked for a system reset (hardcore
 	// enabled with a game loaded) and stays disabled until rc_client_reset
@@ -2191,7 +2267,7 @@ static void ra_poll_impl(void)
 
 void achievements_poll(void)
 {
-	if (!g_ra_debug) {
+	if (!ra_probe_on()) {
 		ra_poll_impl();
 		return;
 	}
@@ -2468,6 +2544,11 @@ int achievements_n64_snapshot_enabled(void)
 int achievements_psx_blanking_sync(void)
 {
 	return g_psx_blanking_sync;
+}
+
+int achievements_snes_sni_guard(void)
+{
+	return g_snes_sni_guard;
 }
 
 int achievements_watch_list(const uint32_t **addrs)
