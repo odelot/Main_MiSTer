@@ -199,6 +199,10 @@ int seladdr_resync_if_backward(console_state_t *state, uint32_t resp_frame,
 // list, not free for a core tracking hundreds of addresses.
 // ---------------------------------------------------------------------------
 #define TRIGDUMP_FRAMES 8
+// Frames to keep recording after a trigger before printing again. The frames up
+// to the trigger cannot tell a false read from a real change; a false read goes
+// back on the next frame (A,B,A) and a real one stays.
+#define TRIGDUMP_POST_FRAMES 3
 
 static uint8_t  s_td_vals[TRIGDUMP_FRAMES][RA_SNES_MAX_ADDRS];
 static uint32_t s_td_addrs[RA_SNES_MAX_ADDRS];
@@ -206,6 +210,39 @@ static uint32_t s_td_frame[TRIGDUMP_FRAMES];
 static int      s_td_count  = 0;
 static int      s_td_head   = 0;
 static int      s_td_filled = 0;
+static int      s_td_post_left = 0;
+static uint32_t s_td_post_id   = 0;
+static char     s_td_post_title[96];
+
+static void seladdr_trigdump_print(const char *tag, uint32_t ach_id, const char *title, int changed_only)
+{
+        int first = (s_td_head - s_td_filled + TRIGDUMP_FRAMES) % TRIGDUMP_FRAMES;
+
+        char hdr[160];
+        int p = 0;
+        for (int f = 0; f < s_td_filled && p < (int)sizeof(hdr) - 12; f++)
+                p += snprintf(hdr + p, sizeof(hdr) - p, " %u", s_td_frame[(first + f) % TRIGDUMP_FRAMES]);
+
+        ra_log_write("%s [%u] %s: %d addrs, last %d evaluated frames (oldest->newest), resp_frame:%s\n",
+                tag, ach_id, title ? title : "", s_td_count, s_td_filled, hdr);
+
+        for (int i = 0; i < s_td_count; i++) {
+                char line[128];
+                int q = 0, changed = 0;
+                uint8_t prev = 0;
+                for (int f = 0; f < s_td_filled && q < (int)sizeof(line) - 4; f++) {
+                        uint8_t v = s_td_vals[(first + f) % TRIGDUMP_FRAMES][i];
+                        if (f && v != prev) changed = 1;
+                        prev = v;
+                        q += snprintf(line + q, sizeof(line) - q, " %02X", v);
+                }
+                if (changed_only && !changed) continue;
+                // '*' marks an address that moved inside the window — the
+                // transition that fired the achievement is on one of these.
+                ra_log_write("  TD %c addr=0x%05X :%s\n",
+                        changed ? '*' : ' ', s_td_addrs[i], line);
+        }
+}
 
 static void seladdr_trigdump_snapshot(void *map)
 {
@@ -232,37 +269,20 @@ static void seladdr_trigdump_snapshot(void *map)
 
         s_td_head = (s_td_head + 1) % TRIGDUMP_FRAMES;
         if (s_td_filled < TRIGDUMP_FRAMES) s_td_filled++;
+
+        if (s_td_post_left > 0 && --s_td_post_left == 0)
+                seladdr_trigdump_print("TRIGDUMP+POST", s_td_post_id, s_td_post_title, 1);
 }
 
 void seladdr_trigdump_report(uint32_t ach_id, const char *title)
 {
         if (!achievements_trigger_dump() || s_td_filled == 0) return;
 
-        int first = (s_td_head - s_td_filled + TRIGDUMP_FRAMES) % TRIGDUMP_FRAMES;
+        seladdr_trigdump_print("TRIGDUMP", ach_id, title, 0);
 
-        char hdr[160];
-        int p = 0;
-        for (int f = 0; f < s_td_filled && p < (int)sizeof(hdr) - 12; f++)
-                p += snprintf(hdr + p, sizeof(hdr) - p, " %u", s_td_frame[(first + f) % TRIGDUMP_FRAMES]);
-
-        ra_log_write("TRIGDUMP [%u] %s: %d addrs, last %d evaluated frames (oldest->newest), resp_frame:%s\n",
-                ach_id, title ? title : "", s_td_count, s_td_filled, hdr);
-
-        for (int i = 0; i < s_td_count; i++) {
-                char line[128];
-                int q = 0, changed = 0;
-                uint8_t prev = 0;
-                for (int f = 0; f < s_td_filled && q < (int)sizeof(line) - 4; f++) {
-                        uint8_t v = s_td_vals[(first + f) % TRIGDUMP_FRAMES][i];
-                        if (f && v != prev) changed = 1;
-                        prev = v;
-                        q += snprintf(line + q, sizeof(line) - q, " %02X", v);
-                }
-                // '*' marks an address that moved inside the window — the
-                // transition that fired the achievement is on one of these.
-                ra_log_write("  TD %c addr=0x%05X :%s\n",
-                        changed ? '*' : ' ', s_td_addrs[i], line);
-        }
+        s_td_post_id = ach_id;
+        snprintf(s_td_post_title, sizeof(s_td_post_title), "%s", title ? title : "");
+        s_td_post_left = TRIGDUMP_POST_FRAMES;
 }
 
 int seladdr_frame_evaluable(void *map, const char *console_name)

@@ -210,27 +210,11 @@ static void execute_request(ra_http_req *req, ra_http_resp *resp)
 	off += snprintf(cmd + off, cmd_len - off, "'");
 	cmd[off] = '\0';
 
-	// Log the command with sensitive params masked: &t= (token) and &p= (password)
-	{
-		char *masked = strdup(cmd);
-		if (masked) {
-			static const char *keys[] = { "&t=", "&p=", NULL };
-			for (int k = 0; keys[k]; k++) {
-				char *pos = strstr(masked, keys[k]);
-				if (pos) {
-					char *val = pos + 3;
-					char *end = val;
-					while (*end && *end != '&' && *end != '\'') end++;
-					memmove(val + 3, end, strlen(end) + 1);
-					memcpy(val, "***", 3);
-				}
-			}
-			HTTP_LOG("CMD: %s", masked);
-			free(masked);
-		}
-	}
+	// ra_log_write hides the &t= (token) and &p= (password) values
+	HTTP_LOG("CMD: %s", cmd);
 
-	FILE *fp = popen(cmd, "r");
+	// "e" = O_CLOEXEC: a core load (app_restart) can exec while curl is running.
+	FILE *fp = popen(cmd, "re");
 	free(cmd);
 
 	if (!fp) {

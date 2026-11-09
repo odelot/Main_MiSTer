@@ -29,3 +29,9 @@ host
 .vs
 MiSTer
 /bin
+
+# ignore debug logs and local agent rules
+*.log
+.agents/
+
+ra_releases/

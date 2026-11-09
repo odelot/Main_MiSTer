@@ -412,6 +412,15 @@ static void snes_set_hardcore(int enabled)
 	ra_log_write("SNES: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 
+static void snes_apply_features(void)
+{
+	// status[59] = 0 leaves SNI timing exactly as it was, so a Main that never
+	// writes the bit gets the old behavior (see the guard in SNES.sv).
+	int on = achievements_snes_sni_guard();
+	user_io_status_set("[59]", on ? 1 : 0);
+	ra_log_write("SNES: RA SNI guard %s\n", on ? "ON" : "OFF");
+}
+
 int snes_detect_protocol(void *map)
 {
 	if (!ra_ramread_active(map)) {
@@ -458,5 +467,6 @@ const console_handler_t g_console_snes = {
 	.detect_protocol = snes_detect_protocol,
 	.console_id = 3,  // RC_CONSOLE_SUPER_NINTENDO
 	.name = "SNES",
-	.hardcore_protected = 1
+	.hardcore_protected = 1,
+	.apply_features = snes_apply_features
 };
