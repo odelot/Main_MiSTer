@@ -41,7 +41,29 @@ void achievements_notify_core_reset(void);
 // "no achievement data in this state" case, which rc_client handles by
 // resetting the runtime. NOT the same as a core reset: this must not satisfy
 // the hardcore waiting_for_reset gate. See achievements_notify_state_loaded().
+// Ignored for cores that report savestate events themselves (see below).
 void achievements_notify_state_loaded(void);
+
+// Savestate progress sync, for cores whose RA mirror reports completed
+// save/load operations (event word at byte 0x48 of the RA header, tagged with
+// the frame of the first capture after them). On save the rcheevos progress is
+// snapshotted per slot together with a fingerprint of the state in DDR; on load
+// the snapshot is restored if its fingerprint matches the state being loaded,
+// otherwise the runtime is reset (same as a state without achievement data in
+// RetroArch). This is what the reference emulators do by storing the runtime
+// in the state (RetroArch) or in a .rap next to it (RAIntegration).
+// Call once per NEW response frame, BEFORE rc_client_do_frame().
+// Returns 1 when the core flagged this capture as taken while it was held
+// (OSD pause): the caller must call rc_client_idle() instead of
+// rc_client_do_frame(), as emulators do while paused -- otherwise hit counts
+// and "hold for N frames" conditions advance with the game frozen.
+int achievements_ss_frame(void *map, uint32_t resp_frame);
+
+// process_ss() hooks: SD savestate files are loaded at ROM load and written
+// when the core saves; the progress snapshot travels in "<state file>.ra".
+void achievements_ss_files_reset(void);
+void achievements_ss_file_loaded(int slot, const char *ss_path);
+void achievements_ss_file_written(int slot, const char *ss_path);
 
 // Notify that save-RAM I/O between the core and the ARM is happening (autosave
 // on OSD-open, manual save/load backup). Cores that share the save port with

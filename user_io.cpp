@@ -681,6 +681,15 @@ int user_io_get_joy_transl()
 static int use_cheats = 0;
 static uint32_t ss_base = 0;
 static uint32_t ss_size = 0;
+
+// Savestate DDR region parsed from the conf string ("SSbase:size", per slot).
+// RetroAchievements fingerprints the slot contents to pair each state with the
+// rcheevos progress snapshot taken when it was saved.
+void user_io_get_ss_region(uint32_t *base, uint32_t *size)
+{
+	if (base) *base = ss_base;
+	if (size) *size = ss_size;
+}
 static uint32_t uart_speeds[13] = {};
 static char uart_speed_labels[13][32] = {};
 static uint32_t midi_speeds[13] = {};
@@ -1943,6 +1952,8 @@ int process_ss(const char *rom_name, int enable)
 		uint32_t map_addr = ss_base;
 		fileTYPE f = {};
 
+		achievements_ss_files_reset(); // RA: new ROM, drop progress snapshots of the old slots
+
 		for (int i = 0; i < 4; i++)
 		{
 			if (!base[i]) base[i] = shmem_map(map_addr, len);
@@ -1977,6 +1988,7 @@ int process_ss(const char *rom_name, int enable)
 						int ret = FileReadAdv(&f, base[i], len);
 						FileClose(&f);
 						printf("process_ss: read %d bytes from file: %s\n", ret, ss_name);
+						achievements_ss_file_loaded(i, ss_name); // RA: progress saved with this state
 					}
 				}
 				*(uint32_t*)(base[i]) = 0xFFFFFFFF;
@@ -2019,6 +2031,7 @@ int process_ss(const char *rom_name, int enable)
 						int ret = FileWriteAdv(&f, base[i], size);
 						FileClose(&f);
 						printf("Wrote %d bytes to file: %s\n", ret, ss_name);
+						achievements_ss_file_written(i, ss_name); // RA: persist the matching progress
 					}
 					else
 					{

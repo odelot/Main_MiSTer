@@ -303,8 +303,14 @@ static int genesis_calculate_hash(const char *rom_path, char *md5_hex_out)
 
 static void genesis_set_hardcore(int enabled)
 {
-	user_io_status_set("[64]", enabled ? 1 : 0); // disable cheats
-	user_io_status_set("[24]", enabled ? 1 : 0); // disable save states
+	// bit 64: hardcore signal -- the core gates both cheat engines (68k + Z80)
+	// with ~hardcore and hides the Cheats page. Only this bit is touched:
+	// status[24] is the user's "Cheats Enabled" OSD toggle (not save states),
+	// and writing it forced "Yes" on every core/game load when hardcore was off.
+	// No restore-state to block: the MegaDrive core has no save states (no SS
+	// in CONF_STR). If upstream ever adds them, gate restore with ~hardcore in
+	// the core like SNES/NES/GB do.
+	user_io_status_set("[64]", enabled ? 1 : 0);
 	ra_log_write("Genesis: Hardcore mode %s\n", enabled ? "enabled" : "disabled");
 }
 

@@ -263,6 +263,7 @@ void user_io_store_filename(char *filename);
 int user_io_use_cheats();
 
 int process_ss(const char *rom_name, int enable = 1);
+void user_io_get_ss_region(uint32_t *base, uint32_t *size);
 
 char is_f12_mod_needed();
 void diskled_on();

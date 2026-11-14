@@ -161,8 +161,14 @@ static int nes_poll(void *map, void *client, int game_loaded)
 						g_nes_state.game_frames, resp_frame, ra_snes_addrlist_count());
 				}
 
+				// Savestate save/load completed before this capture: snapshot or
+				// restore the progress before the frame is evaluated. A capture
+				// taken while the core is held (OSD pause) is not a game frame:
+				// idle like an emulator's pause loop does.
+				if (achievements_ss_frame(map, resp_frame))
+					rc_client_idle(rc_client);
 				// Skip frames whose VALCACHE ordering is unconfirmed (see helper).
-				if (seladdr_frame_evaluable(map, "NES"))
+				else if (seladdr_frame_evaluable(map, "NES"))
 					rc_client_do_frame(rc_client);
 
 				// Dynamic-only prune (~1/min, only if dynamics piled up):
@@ -243,9 +249,14 @@ static int nes_poll(void *map, void *client, int game_loaded)
 					g_nes_state.game_frames, resp_frame);
 			}
 
+			// Savestate save/load completed before this capture, and OSD-pause
+			// captures idle instead of being evaluated (see smart-cache path).
+			if (achievements_ss_frame(map, resp_frame)) {
+				rc_client_idle(rc_client);
+			}
 			// Skip achievement processing while a recollect revision is in
 			// flight (newly collected addresses would read as 0).
-			if (ra_snes_addrlist_is_ready(map)) {
+			else if (ra_snes_addrlist_is_ready(map)) {
 				// Periodically re-collect (~5 min)
 				int re_collect = !achievements_smart_cache_enabled()
 					&& (g_nes_state.game_frames % 18000 == 0) && (g_nes_state.game_frames > 0);

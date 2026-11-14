@@ -406,6 +406,12 @@ static int psx_poll(void *map, void *client, int game_loaded)
 						g_psx_state.game_frames, resp_frame, ra_snes_addrlist_count());
 				}
 
+				// Capture taken while the core was held (OSD/button/CD-slow/
+				// savestate/memcard pause): no game time passed, idle like an
+				// emulator's pause loop. Never collect on such a frame -- the
+				// address list is rebuilt from the reads do_frame makes.
+				int core_paused = achievements_ss_frame(map, resp_frame);
+
 				// Periodic cleanup: rebuild address list to prune stale entries.
 				// Gated by: (a) some add_dynamic happened since last cleanup
 				// and (b) current count > initial * (1 + PSX_CLEANUP_GROWTH_PCT/100).
@@ -413,7 +419,8 @@ static int psx_poll(void *map, void *client, int game_loaded)
 				// for the qsort/memcmp/DDR3 work to be worth it.
 				uint32_t growth_threshold = (g_psx_initial_addr_count
 					* (uint32_t)(100 + PSX_CLEANUP_GROWTH_PCT)) / 100u;
-				int cleanup_frame = (g_psx_state.game_frames % 600 == 0)
+				int cleanup_frame = !core_paused
+					&& (g_psx_state.game_frames % 600 == 0)
 					&& (g_psx_state.game_frames > 0)
 					&& ra_snes_addrlist_is_ready(map)
 					&& (g_psx_changes_since_cleanup > 0)
@@ -428,8 +435,10 @@ static int psx_poll(void *map, void *client, int game_loaded)
 				{
 					struct timespec t0, t1;
 					clock_gettime(CLOCK_MONOTONIC, &t0);
+					if (core_paused)
+						rc_client_idle(rc_client);
 					// Skip frames whose VALCACHE ordering is unconfirmed (see helper).
-					if (seladdr_frame_evaluable(map, "PSX"))
+					else if (seladdr_frame_evaluable(map, "PSX"))
 						rc_client_do_frame(rc_client);
 					clock_gettime(CLOCK_MONOTONIC, &t1);
 					uint64_t dt = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ULL
@@ -596,9 +605,13 @@ static int psx_poll(void *map, void *client, int game_loaded)
 				psx_seladdr_dump_valcache("early-frame", map);
 			}
 
+			// Paused capture: idle, and never re-collect on it (see smart-cache path).
+			int core_paused = achievements_ss_frame(map, resp_frame);
+
 			// Re-collect every N frames to track pointer changes (configurable)
 			int interval = achievements_recollect_interval();
-			int re_collect = (g_psx_state.game_frames % interval == 0) && (g_psx_state.game_frames > 0);
+			int re_collect = !core_paused
+				&& (g_psx_state.game_frames % interval == 0) && (g_psx_state.game_frames > 0);
 			if (re_collect) {
 				g_psx_state.collecting = 1;
 				ra_snes_addrlist_begin_collect();
@@ -608,7 +621,10 @@ static int psx_poll(void *map, void *client, int game_loaded)
 			{
 				struct timespec t0, t1;
 				clock_gettime(CLOCK_MONOTONIC, &t0);
-				rc_client_do_frame(rc_client);
+				if (core_paused)
+					rc_client_idle(rc_client);
+				else
+					rc_client_do_frame(rc_client);
 				clock_gettime(CLOCK_MONOTONIC, &t1);
 				uint64_t dt = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ULL
 				            + (uint64_t)(t1.tv_nsec - t0.tv_nsec);
