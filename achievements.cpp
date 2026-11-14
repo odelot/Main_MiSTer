@@ -28,6 +28,7 @@
 #include "user_io.h"
 #include "cfg.h"
 #include "file_io.h"
+#include "shmem.h"
 #include "menu.h"
 #include "osd.h"
 #include "hardware.h"
@@ -1785,9 +1786,292 @@ static void ra_update_user_agent(void)
         }
 }
 
+// ---------------------------------------------------------------------------
+// Savestate progress sync (see achievements.h)
+//
+// Core event word at byte 0x48 of the RA header (FPGA → ARM), same layout in
+// every core (0x20-0x38 are taken by some cores' debug words, 0x40 is the ARM
+// config), written in each flush before the response header:
+//   [31:0]  frame tag: the capture these counters were latched with
+//   [39:32] save_seq   (completed saves, cumulative, never reset)
+//   [47:40] load_seq   (completed loads that reached the restore phase)
+//   [49:48] save_slot  (slot of the most recent save)
+//   [51:50] load_slot  (slot of the most recent load)
+//   [52]    last_was_load (orders a save+load pair between two captures)
+//   [53]    paused: capture taken while the core was held (OSD pause etc.)
+//   [54]    ss_events: the core reports savestate operations (bits 52:32 valid)
+//   [63:56] marker 0x53
+// ---------------------------------------------------------------------------
+#define RA_SS_EVT_OFFSET  0x48
+#define RA_SS_EVT_MARKER  0x53
+#define RA_SS_SLOTS       4
+#define RA_SS_FP_BYTES    (32 * 1024)   // state prefix hashed (CPU/PPU internals + start of RAM)
+#define RA_SS_FILE_MAGIC  0x53534152u   // "RASS"
+#define RA_SS_FILE_VER    1u
+
+typedef struct {
+	uint8_t *blob;          // rc_client_serialize_progress() output
+	uint32_t size;
+	uint64_t fp;            // fingerprint of the state the blob belongs to
+	char     path[1024];    // SD state file waiting for its ".ra" companion
+	int      write_pending;
+} ra_ss_slot_t;
+
+typedef struct __attribute__((packed)) {
+	uint32_t magic;
+	uint32_t version;
+	uint64_t fp;
+	uint32_t size;
+} ra_ss_file_hdr_t;
+
+static ra_ss_slot_t s_ss[RA_SS_SLOTS];
+static int     s_ss_supported = 0;  // the core reports savestate events
+static int     s_ss_baseline  = 0;  // counters below are valid for this session
+static uint8_t s_ss_save_seq  = 0;
+static uint8_t s_ss_load_seq  = 0;
+
+static void ra_ss_session_reset(void)
+{
+	// Re-baseline on the next frame: events from before this point (previous
+	// game, the load itself) must not be replayed against the new session.
+	s_ss_baseline = 0;
+}
+
+static void ra_ss_slot_clear(ra_ss_slot_t *s)
+{
+	free(s->blob);
+	s->blob = NULL;
+	s->size = 0;
+	s->fp = 0;
+	s->path[0] = 0;
+	s->write_pending = 0;
+}
+
+// FNV-1a over the slot header's size word and the first RA_SS_FP_BYTES of the
+// state. Skips the 32-bit save counter at offset 0: process_ss() overwrites it
+// with 0xFFFFFFFF after loading a state from SD. Returns 0 for an empty slot.
+static int ra_ss_fingerprint(int slot, uint64_t *fp)
+{
+	uint32_t base = 0, size = 0;
+	user_io_get_ss_region(&base, &size);
+	if (!base || !size || slot < 0 || slot >= RA_SS_SLOTS) return 0;
+
+	static uint8_t buf[RA_SS_FP_BYTES + 8];
+	uint32_t len = sizeof(buf);
+	if (len > size) len = size;
+	if (!shmem_get(base + (uint32_t)slot * size, len, buf)) return 0;
+	if (((const uint32_t *)buf)[1] == 0) return 0;
+
+	uint64_t h = 0xcbf29ce484222325ULL;
+	for (uint32_t i = 4; i < len; i++) {
+		h ^= buf[i];
+		h *= 0x100000001b3ULL;
+	}
+	*fp = h;
+	return 1;
+}
+
+// Write "<state>.ra" once the in-memory snapshot is the one for the state the
+// core just wrote to SD (process_ss can poll the slot before we have seen the
+// save event, so the pairing is re-checked by fingerprint, not by timing).
+static void ra_ss_try_write(int slot)
+{
+	ra_ss_slot_t *s = &s_ss[slot];
+	if (!s->write_pending || !s->blob) return;
+	uint64_t fp;
+	if (!ra_ss_fingerprint(slot, &fp) || fp != s->fp) return;
+
+	char name[1100];
+	snprintf(name, sizeof(name), "%s.ra", s->path);
+	uint32_t total = sizeof(ra_ss_file_hdr_t) + s->size;
+	uint8_t *out = (uint8_t *)malloc(total);
+	if (!out) return;
+	ra_ss_file_hdr_t *h = (ra_ss_file_hdr_t *)out;
+	h->magic = RA_SS_FILE_MAGIC;
+	h->version = RA_SS_FILE_VER;
+	h->fp = s->fp;
+	h->size = s->size;
+	memcpy(out + sizeof(*h), s->blob, s->size);
+	int ok = FileSave(name, out, (int)total) == (int)total;
+	free(out);
+	s->write_pending = 0;
+	RA_LOG("SS: slot %d progress %s %s (%u bytes)", slot + 1, ok ? "written to" : "FAILED to write", name, total);
+}
+
+#ifdef HAS_RCHEEVOS
+static void ra_ss_on_save(int slot)
+{
+	ra_ss_slot_t *s = &s_ss[slot];
+	uint64_t fp;
+	if (!ra_ss_fingerprint(slot, &fp)) {
+		RA_LOG("SS: save slot %d -- state not readable in DDR, no progress snapshot", slot + 1);
+		free(s->blob); s->blob = NULL; s->size = 0;
+		return;
+	}
+	size_t sz = rc_client_progress_size(g_client);
+	uint8_t *b = sz ? (uint8_t *)malloc(sz) : NULL;
+	if (!b || rc_client_serialize_progress_sized(g_client, b, sz) != RC_OK) {
+		RA_LOG("SS: save slot %d -- serialize_progress failed (size=%u)", slot + 1, (unsigned)sz);
+		free(b);
+		free(s->blob); s->blob = NULL; s->size = 0;
+		return;
+	}
+	free(s->blob);
+	s->blob = b;
+	s->size = (uint32_t)sz;
+	s->fp = fp;
+	RA_LOG("SS: save slot %d -> progress snapshot %u bytes (state fp %016llx)",
+		slot + 1, (unsigned)sz, (unsigned long long)fp);
+	ra_ss_try_write(slot);
+}
+
+static void ra_ss_on_load(int slot)
+{
+	ra_ss_slot_t *s = &s_ss[slot];
+	if (rc_client_get_hardcore_enabled(g_client)) {
+		// Unreachable by design (the core blocks loads in hardcore). Never
+		// restore progress in hardcore; just drop any delta across the load.
+		RA_LOG("SS: load slot %d while hardcore is on -- runtime reset, no restore", slot + 1);
+		rc_client_deserialize_progress(g_client, NULL);
+		return;
+	}
+	uint64_t fp = 0;
+	int have_fp = ra_ss_fingerprint(slot, &fp);
+	if (s->blob && have_fp && fp == s->fp) {
+		int res = rc_client_deserialize_progress_sized(g_client, s->blob, s->size);
+		if (res == RC_OK) {
+			RA_LOG("SS: load slot %d -> progress restored from its save (%u bytes, fp %016llx)",
+				slot + 1, s->size, (unsigned long long)fp);
+			return;
+		}
+		RA_LOG("SS: load slot %d -- deserialize_progress failed (%d), runtime reset", slot + 1, res);
+	} else {
+		RA_LOG("SS: load slot %d -- no snapshot for this state (have=%d fp_ok=%d), runtime reset",
+			slot + 1, s->blob ? 1 : 0, (have_fp && s->blob && fp == s->fp) ? 1 : 0);
+	}
+	// Same as a state without achievement data in RetroArch: every trigger
+	// back to WAITING, no delta spanning the load.
+	rc_client_deserialize_progress(g_client, NULL);
+}
+#endif
+
+static int s_ss_paused_logged = 0;
+
+int achievements_ss_frame(void *map, uint32_t resp_frame)
+{
+#ifdef HAS_RCHEEVOS
+	if (!map || !g_client || !g_game_loaded) return 0;
+
+	const volatile uint32_t *w = (const volatile uint32_t *)((const uint8_t *)map + RA_SS_EVT_OFFSET);
+	uint32_t tag = w[0];
+	uint32_t ev  = w[1];
+	if (w[0] != tag) return 0;                     // torn: the next frame carries the same counters
+	if ((ev >> 24) != RA_SS_EVT_MARKER) return 0;  // core without the event word
+	if (tag != resp_frame) return 0;               // a newer flush is in progress
+
+	int paused = (ev >> 21) & 1;
+	if (paused != s_ss_paused_logged) {
+		s_ss_paused_logged = paused;
+		RA_LOG("SS: core %s -- frames %s", paused ? "paused" : "resumed",
+			paused ? "idle (not evaluated)" : "evaluated again");
+	}
+
+	if (!((ev >> 22) & 1)) return paused;          // no savestate events from this core
+
+	if (!s_ss_supported) {
+		s_ss_supported = 1;
+		RA_LOG("SS: core reports savestate events -- progress follows save/load");
+	}
+
+	uint8_t sv = ev & 0xFF;
+	uint8_t ld = (ev >> 8) & 0xFF;
+	int sv_slot = (ev >> 16) & 3;
+	int ld_slot = (ev >> 18) & 3;
+	int last_was_load = (ev >> 20) & 1;
+
+	if (!s_ss_baseline) {
+		s_ss_save_seq = sv;
+		s_ss_load_seq = ld;
+		s_ss_baseline = 1;
+		return paused;
+	}
+
+	int new_save = sv != s_ss_save_seq;
+	int new_load = ld != s_ss_load_seq;
+	if ((uint8_t)(sv - s_ss_save_seq) > 1 || (uint8_t)(ld - s_ss_load_seq) > 1)
+		RA_LOG("SS: missed events (save %u->%u, load %u->%u), acting on the latest only",
+			s_ss_save_seq, sv, s_ss_load_seq, ld);
+	s_ss_save_seq = sv;
+	s_ss_load_seq = ld;
+
+	if (new_save && new_load && last_was_load) {
+		ra_ss_on_save(sv_slot);
+		ra_ss_on_load(ld_slot);
+	} else if (new_save && new_load) {
+		ra_ss_on_load(ld_slot);
+		ra_ss_on_save(sv_slot);
+	} else if (new_save) {
+		ra_ss_on_save(sv_slot);
+	} else if (new_load) {
+		ra_ss_on_load(ld_slot);
+	}
+	return paused;
+#else
+	(void)map; (void)resp_frame;
+	return 0;
+#endif
+}
+
+void achievements_ss_files_reset(void)
+{
+	for (int i = 0; i < RA_SS_SLOTS; i++) ra_ss_slot_clear(&s_ss[i]);
+}
+
+void achievements_ss_file_loaded(int slot, const char *ss_path)
+{
+	if (slot < 0 || slot >= RA_SS_SLOTS || !ss_path) return;
+	ra_ss_slot_t *s = &s_ss[slot];
+	ra_ss_slot_clear(s);
+
+	char name[1100];
+	snprintf(name, sizeof(name), "%s.ra", ss_path);
+	int total = FileExists(name, 0) ? FileLoad(name, NULL, 0) : 0;
+	if (total <= (int)sizeof(ra_ss_file_hdr_t) || total > 4 * 1024 * 1024) return;
+
+	uint8_t *in = (uint8_t *)malloc(total);
+	if (!in) return;
+	if (FileLoad(name, in, total) != total) { free(in); return; }
+	const ra_ss_file_hdr_t *h = (const ra_ss_file_hdr_t *)in;
+	if (h->magic != RA_SS_FILE_MAGIC || h->version != RA_SS_FILE_VER ||
+	    h->size != (uint32_t)total - sizeof(*h)) {
+		RA_LOG("SS: %s ignored (bad header)", name);
+		free(in);
+		return;
+	}
+	s->blob = (uint8_t *)malloc(h->size);
+	if (s->blob) {
+		memcpy(s->blob, in + sizeof(*h), h->size);
+		s->size = h->size;
+		s->fp = h->fp;
+		RA_LOG("SS: slot %d progress loaded from %s (%u bytes, fp %016llx)",
+			slot + 1, name, s->size, (unsigned long long)s->fp);
+	}
+	free(in);
+}
+
+void achievements_ss_file_written(int slot, const char *ss_path)
+{
+	if (slot < 0 || slot >= RA_SS_SLOTS || !ss_path) return;
+	ra_ss_slot_t *s = &s_ss[slot];
+	snprintf(s->path, sizeof(s->path), "%s", ss_path);
+	s->write_pending = 1;
+	ra_ss_try_write(slot);  // no-op until the save event for this state is seen
+}
+
 void achievements_load_game(const char *rom_path, uint32_t crc32)
 {
         if (!g_active_handler) return;
+        ra_ss_session_reset();
 
         // Virtual Boy: the OSD offers auxiliary loads without the config-store
         // flag (VBT brightness tables, TAS movies) that also land here. Only a
@@ -2335,6 +2619,7 @@ void achievements_poll(void)
 void achievements_unload_game(void)
 {
         if (!g_active_handler) return;
+        ra_ss_session_reset();
 
         RA_LOG("--- Game Unload ---");
         RA_LOG("Stats: %u frames processed, %u skipped", g_frames_processed, g_frames_skipped);
@@ -2424,6 +2709,10 @@ void achievements_notify_core_reset(void)
 void achievements_notify_state_loaded(void)
 {
         if (!g_active_handler) return;
+        // The core reports the load itself (and which slot), so the progress
+        // saved with that state is restored by achievements_ss_frame(). Resetting
+        // here as well would wipe it.
+        if (s_ss_supported) return;
 
 #ifdef HAS_RCHEEVOS
         if (!g_client || !g_game_loaded) return;

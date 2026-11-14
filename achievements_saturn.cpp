@@ -1,8 +1,13 @@
 // achievements_saturn.cpp — RetroAchievements Saturn-specific implementation
 //
 // Memory layout in DDR3 (accessible via shmem_map):
-//   RAML (Work RAM Low,  1MB): physical 0x30000000
+//   RAML (Work RAM Low,  1MB): physical 0x30200000
 //   RAMH (Work RAM High, 1MB): physical 0x30300000
+//
+// The core's ddram.sv RAML port is shared by three SH-2 areas, selected by
+// raml_addr[21:19] = {~RAML_CS_N, ~SRAM_CS_N, ...}: BIOS ROM at +0x000000,
+// internal backup RAM at +0x100000, Work RAM Low at +0x200000. So 0x30000000
+// is the BIOS, NOT Work RAM Low (reading it returns static BIOS bytes).
 //
 // Byte order: Saturn is big-endian; the core's DDR3 stores SH-2 byte K at
 // offset K^7 (64-bit big-endian packing). RA sets are authored against
@@ -33,7 +38,7 @@
 // Saturn constants
 // ---------------------------------------------------------------------------
 
-#define SATURN_RAML_PHYS     0x30000000u
+#define SATURN_RAML_PHYS     0x30200000u
 #define SATURN_RAML_SIZE     0x00100000u  // 1MB Work RAM Low
 #define SATURN_RAMH_PHYS     0x30300000u
 #define SATURN_RAMH_SIZE     0x00100000u  // 1MB Work RAM High
@@ -48,7 +53,7 @@
 // ---------------------------------------------------------------------------
 
 static console_state_t g_saturn_state = {};
-static void *g_saturn_raml = NULL;  // mmap of physical 0x30000000, 1MB
+static void *g_saturn_raml = NULL;  // mmap of physical 0x30200000, 1MB
 static void *g_saturn_ramh = NULL;  // mmap of physical 0x30300000, 1MB
 
 // Debug watch (retroachievements.cfg: watch=...): last seen value per address
@@ -68,15 +73,18 @@ static void saturn_init(void)
         // (between RAMH end at 0x303FFFFF and cdbuf at 0x31000000)
         ra_ramread_set_base(0x30F00000u);
 
-        // The Saturn FPGA channel only writes the frame counter word (offset
-        // 0x08); the static RACH header word is written once here by the ARM.
-        // This keeps the FPGA-side RA logic down to a single-word writer.
+        // The Saturn FPGA channel only writes the 64-bit word at offset 0x08
+        // (frame counter + core version + build flags); the static RACH header
+        // word is written once here by the ARM. The core version placed here is
+        // a placeholder: saturn_detect_protocol() replaces it with the one the
+        // RBF reports, so the User-Agent follows the core, not the Main.
         void *hdr = shmem_map(0x30F00000u, 4096);
         if (hdr) {
                 volatile uint32_t *w = (volatile uint32_t *)hdr;
-                w[1] = 0x01000000u;   // region_count=0, flags=0, core_version=1.0
+                w[1] = 0x01000000u;   // region_count=0, flags=0, core_version=1.0 (placeholder)
                 w[2] = 0;             // frame counter (FPGA overwrites every VBlank)
-                w[3] = 0;
+                w[3] = 0;             // core version + build flags (FPGA >= 2.0 overwrites;
+                                      // must start at 0 so a stale value can't fake a version)
                 w[0] = 0x52414348u;   // magic "RACH" — written last
                 shmem_unmap(hdr, 4096);
                 ra_log_write("Saturn: RACH header written by ARM at 0x30F00000\n");
@@ -250,7 +258,27 @@ static int saturn_detect_protocol(void *map)
                 return 0;
         }
 
-        // Map Work RAM Low (RAML) directly: physical 0x30000000, 256KB
+        // Core version and build flags come from the RBF (ddram.sv RA channel),
+        // written next to the frame counter. This runs after the frame counter
+        // advanced, so the FPGA has rewritten the word since saturn_init() zeroed it.
+        //   0x0C: core version (major << 8 | minor); 0 = RBF older than 2.0
+        //   0x0E: build flags; bit0 = WRAM-H lives in SDRAM2 (dual-SDRAM build)
+        {
+                volatile ra_header_t *h = (volatile ra_header_t *)map;
+                uint32_t info  = h->reserved2;
+                uint16_t ver   = (uint16_t)(info & 0xFFFF);
+                uint8_t  flags = (uint8_t)((info >> 16) & 0xFF);
+                if (flags & 0x01) {
+                        ra_log_write("Saturn: dual-SDRAM build (WRAM-H not in DDR3) -- RA support unavailable\n");
+                        return 0;
+                }
+                h->core_version = ver ? ver : 0x0100;
+                ra_log_write("Saturn: core reports version %u.%u%s\n",
+                        (h->core_version >> 8) & 0xFF, h->core_version & 0xFF,
+                        ver ? "" : " (RBF without version field, assuming 1.0)");
+        }
+
+        // Map Work RAM Low (RAML) directly: physical 0x30200000, 1MB
         if (!g_saturn_raml) {
                 g_saturn_raml = shmem_map(SATURN_RAML_PHYS, SATURN_RAML_SIZE);
                 if (g_saturn_raml)
